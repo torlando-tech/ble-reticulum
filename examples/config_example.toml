@@ -1,0 +1,275 @@
+# Example Reticulum configuration with BLE interface
+# Place this in ~/.reticulum/config or /etc/reticulum/config
+
+[reticulum]
+enable_transport = No
+share_instance = Yes
+shared_instance_port = 37428
+instance_control_port = 37429
+
+[[BLE Interface]]
+type = BLEInterface
+enabled = yes
+
+# ============================================================================
+# DEVICE IDENTIFICATION
+# ============================================================================
+
+# Device name advertised to other BLE devices
+# A unique device name will be auto-generated if not specified
+# Max length: ~20 characters for compatibility
+# device_name = Reticulum-Node-01
+
+# ============================================================================
+# BLE SERVICE UUID
+# ============================================================================
+
+# BLE Service UUID for Reticulum
+# Default: 00000001-5824-4f48-9e1a-3b3e8f0c1234
+# All devices must use the same UUID to discover each other
+# Change this to create isolated BLE networks that won't interfere
+# service_uuid = 00000001-5824-4f48-9e1a-3b3e8f0c1234
+
+# ============================================================================
+# PERIPHERAL MODE (GATT Server)
+# ============================================================================
+
+# Enable peripheral mode to allow other devices to connect to you
+# When enabled:
+# - Your device advertises itself as a Reticulum BLE service
+# - Other devices can discover and connect to you (you act as server)
+# - Supports up to 7 simultaneous central connections
+# - Enables true peer-to-peer mesh networking
+#
+# When disabled:
+# - Your device only acts as central (connects to others)
+# - You will not be visible in BLE scanner apps
+# - Other devices cannot initiate connections to you
+#
+# Default: yes (recommended for mesh networking)
+# Requires: bluezero library (pip install bluezero>=0.9.1)
+enable_peripheral = yes
+
+# ============================================================================
+# CENTRAL MODE (BLE Client)
+# ============================================================================
+
+# Enable central mode to scan for and connect to other BLE devices
+# When enabled:
+# - Your device actively scans for nearby Reticulum BLE peripherals
+# - Automatically connects to discovered peers (you act as client)
+# - Enables outbound connections for mesh networking
+#
+# When disabled:
+# - Your device only acts as peripheral (accepts connections)
+# - You will not discover or connect to other devices
+# - Other devices must connect to you
+#
+# Default: yes (recommended for mesh networking)
+# Requires: bleak library (pip install bleak>=1.1.1)
+enable_central = yes
+
+# ============================================================================
+# DISCOVERY PARAMETERS
+# ============================================================================
+
+# How often to scan for new peers (seconds)
+# Lower values = faster discovery, higher power consumption
+# Higher values = slower discovery, lower power consumption
+# Range: 1.0 - 30.0 seconds
+# Default: 5.0
+discovery_interval = 5.0
+
+# Maximum simultaneous BLE connections
+# Conservative default for stability across different BLE adapters
+# Linux with BlueZ may support more, but 7 is recommended for reliability
+# Range: 1 - 20+ (hardware dependent)
+# Default: 7
+max_connections = 7
+
+# Minimum signal strength to consider (dBm)
+# Range: -100 (very weak) to -30 (very strong)
+# Typical values:
+#   -60 or higher: Close range, high reliability (0-10m)
+#   -70: Medium range (10-15m)
+#   -80: Balanced (15-25m)
+#   -85: Default, more permissive (15-30m)
+#   -90: Long range, lower reliability (25-30m+)
+# Default: -85
+min_rssi = -85
+
+# Connection timeout (seconds)
+# How long to wait for connection establishment before giving up
+# Increase if you see frequent connection timeouts
+# Range: 10.0 - 60.0 seconds
+# Default: 30.0
+connection_timeout = 30.0
+
+# ============================================================================
+# CONNECTION PRIORITIZATION
+# ============================================================================
+
+# The BLE interface uses intelligent peer selection based on:
+# 1. Signal Strength (RSSI): 60% weight - Prioritizes physically close peers
+# 2. Connection History: 30% weight - Rewards reliable peers
+# 3. Recency: 10% weight - Prefers recently seen active peers
+#
+# Scoring algorithm automatically selects the best peers to connect to
+# based on these factors. No user configuration required for scoring.
+
+# Connection rotation interval (seconds)
+# How often to evaluate existing connections and potentially rotate
+# to new peers for mesh diversity
+# Set to 0 to disable rotation (not yet fully implemented)
+# Range: 60 - 3600 seconds (1 minute - 1 hour)
+# Default: 600 (10 minutes)
+connection_rotation_interval = 600
+
+# Connection retry backoff (seconds)
+# Base time to wait before retrying a failed connection
+# Actual backoff uses exponential backoff: base * (2^failures)
+# Example with base=60: 60s, 120s, 240s, 480s (capped at 8x = 480s)
+# Range: 30 - 300 seconds
+# Default: 60
+connection_retry_backoff = 60
+
+# Maximum connection failures before blacklisting
+# Number of consecutive failures before temporarily blacklisting a peer
+# Blacklist duration increases with exponential backoff (see above)
+# Set higher (e.g., 5) to be more tolerant of intermittent failures
+# Set lower (e.g., 2) to be more aggressive about avoiding bad peers
+# Range: 1 - 10
+# Default: 3
+max_connection_failures = 3
+
+# Blacklist behavior:
+# - After max_connection_failures, peer is blacklisted
+# - Blacklist duration: connection_retry_backoff * (failures - threshold + 1)
+# - Example: 3 failures → 60s, 4 failures → 120s, 5 failures → 240s
+# - Blacklist expires automatically, allowing retries
+# - Successful connection clears blacklist immediately
+
+# ============================================================================
+# POWER MANAGEMENT
+# ============================================================================
+
+# Power management mode
+# Options:
+#   aggressive - Continuous scanning (high power, fastest discovery <5s)
+#   balanced   - Periodic scanning every 5 seconds (default, good balance)
+#   saver      - Minimal scanning every 10 seconds (low power, slow discovery)
+#
+# Affects:
+# - BLE scan frequency and duration
+# - Discovery latency (time to find new peers)
+# - Battery consumption on mobile devices
+# - CPU usage
+#
+# Recommendations:
+# - Desktop/laptop: aggressive or balanced
+# - Battery-powered: balanced or saver
+# - Critical battery: saver
+# Default: balanced
+power_mode = balanced
+
+# ============================================================================
+# ADVANCED / EXPERIMENTAL OPTIONS
+# ============================================================================
+
+# Local announce forwarding (experimental workaround)
+# By default, Reticulum Transport.py does not forward locally-originated
+# announces (hops=0) to physical interfaces. This is intentional behavior
+# to prevent announce loops, but may affect some use cases where you want
+# your local announces to propagate via BLE.
+#
+# When enabled:
+# - Locally-originated announces (from this device) are manually forwarded to BLE peers
+# - May help with certain network topologies where local announces need BLE propagation
+# - Could potentially cause announce loops if not carefully configured
+#
+# When disabled (default):
+# - Normal Reticulum Transport behavior applies
+# - Only relayed announces (hops > 0) are forwarded via BLE
+# - Recommended for most use cases
+#
+# Default: no (disabled)
+# Only enable if you understand the implications and have a specific use case
+# enable_local_announce_forwarding = no
+
+# ============================================================================
+# INTERFACE ACCESS CODE (IFAC) SETTINGS
+# ============================================================================
+
+# Used for network segregation at the Reticulum level
+# Optional - leave commented for most use cases
+# ifac_size = 8
+# ifac_netname =
+# ifac_netkey =
+
+# ============================================================================
+# ANNOUNCE SETTINGS
+# ============================================================================
+
+# Announce settings control how much bandwidth is allocated for announces
+# Optional - leave commented for most use cases
+# announce_cap = 2  # Percentage of bandwidth for announces
+
+# ============================================================================
+# TROUBLESHOOTING
+# ============================================================================
+
+# If you experience issues:
+#
+# 1. No peers discovered:
+#    - Verify Bluetooth is enabled
+#    - Check service_uuid matches on all devices
+#    - Try power_mode = aggressive
+#    - Increase min_rssi to -90 for longer range
+#    - Check Bluetooth permissions (Linux: see README)
+#
+# 2. Connection timeouts:
+#    - Increase connection_timeout to 60
+#    - Reduce max_connections to 3-5
+#    - Check for BLE/WiFi interference
+#    - Verify peer is within range (10-30m)
+#
+# 3. GATT server failed to start:
+#    - Install bluezero: pip install bluezero>=0.9.1 dbus-python>=1.2.18
+#    - Check Bluetooth permissions (Linux: sudo setcap 'cap_net_raw,cap_net_admin+eip' $(which python3))
+#    - Try running with sudo (not recommended for production)
+#    - Set enable_peripheral = no to disable peripheral mode
+#
+# 4. Peers blacklisted frequently:
+#    - Increase max_connection_failures to 5
+#    - Check RSSI values (may be at edge of range)
+#    - Reduce connection_retry_backoff to 30 for faster retries
+#
+# 5. Device not visible in BLE scanners:
+#    - Verify enable_peripheral = yes
+#    - Check GATT server started (logs: "GATT server started and advertising")
+#    - Restart Bluetooth service (Linux: sudo systemctl restart bluetooth)
+#    - Check device_name is not too long (max ~20 characters)
+#
+# For more troubleshooting, see README.md
+
+# ============================================================================
+# PERFORMANCE TUNING
+# ============================================================================
+
+# For best performance:
+# - Use balanced or aggressive power mode
+# - Keep max_connections at 7 (recommended default)
+# - Set min_rssi to -80 (reliable range: 15-25m)
+# - Use connection prioritization defaults (optimized for most scenarios)
+#
+# For maximum battery life:
+# - Use saver power mode
+# - Reduce max_connections to 3-5
+# - Set min_rssi to -70 (shorter range, more reliable connections)
+# - Increase discovery_interval to 10
+#
+# For maximum range:
+# - Use aggressive power mode
+# - Set min_rssi to -90 (accept weaker signals)
+# - Increase connection_timeout to 45-60
+# - Expect lower reliability and throughput

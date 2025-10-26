@@ -1,0 +1,10 @@
+# Development Dependencies for Reticulum BLE Interface
+# Install with: pip install -r requirements-dev.txt
+
+# Include all runtime dependencies
+-r requirements.txt
+
+# Testing frameworks
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.0.0

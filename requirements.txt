@@ -1,0 +1,20 @@
+# Reticulum BLE Interface Requirements
+# Python >= 3.8 required
+# Platform: Linux with BlueZ 5.x (for GATT server support)
+
+# Core BLE library (central mode - scanning and connecting)
+# Version 1.1.1 provides improved BlueZ backend stability
+bleak==1.1.1
+
+# BLE GATT Server library (peripheral mode - accepting connections)
+# Linux-only, requires BlueZ D-Bus API
+bluezero>=0.9.1
+dbus-python>=1.2.18
+
+# Reticulum Network Stack
+# If not already installed, uncomment:
+# rns>=1.0.0
+
+# Development Dependencies
+# For testing and development, use:
+#   pip install -r requirements-dev.txt
