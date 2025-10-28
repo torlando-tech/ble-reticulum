@@ -124,16 +124,16 @@ print_header "Installing System Dependencies"
 if command -v apt-get &> /dev/null; then
     # Debian/Ubuntu/Raspberry Pi OS
     print_info "Detected Debian/Ubuntu-based system"
-    echo "Installing: python3-pip python3-dbus bluez"
+    echo "Installing: python3-pip python3-gi python3-dbus python3-cairo bluez"
     sudo apt-get update
-    sudo apt-get install -y python3-pip python3-dbus bluez
-    print_success "System dependencies installed"
+    sudo apt-get install -y python3-pip python3-gi python3-dbus python3-cairo bluez
+    print_success "System dependencies installed (using pre-compiled system packages)"
 elif command -v pacman &> /dev/null; then
     # Arch Linux
     print_info "Detected Arch Linux"
-    echo "Installing: python-pip python-dbus bluez bluez-utils"
-    sudo pacman -S --noconfirm python-pip python-dbus bluez bluez-utils
-    print_success "System dependencies installed"
+    echo "Installing: python-pip python-gobject python-dbus python-cairo bluez bluez-utils"
+    sudo pacman -S --noconfirm python-pip python-gobject python-dbus python-cairo bluez bluez-utils
+    print_success "System dependencies installed (using pre-compiled system packages)"
 else
     print_warning "Could not detect package manager"
     print_info "Please manually install: BlueZ 5.x, python3-dbus"
@@ -149,6 +149,8 @@ echo
 # Step 3: Install Python dependencies
 print_header "Installing Python Dependencies"
 
+print_info "Installing pip packages (PyGObject, dbus-python, pycairo provided by system packages)"
+
 if [ "$INSTALL_MODE" = "venv" ]; then
     print_info "Installing to virtual environment: $RNS_VENV"
 
@@ -159,20 +161,27 @@ if [ "$INSTALL_MODE" = "venv" ]; then
 
     # Activate venv and install
     source "$RNS_VENV/bin/activate"
-    pip install -r requirements.txt
+
+    # Install only packages not provided by system packages
+    # System packages provide: PyGObject (gi), dbus-python (dbus), pycairo (cairo)
+    # We need to install: bleak, bluezero
+    pip install bleak==1.1.1 bluezero
     print_success "Python dependencies installed in virtual environment"
+    print_info "Note: Using system-provided PyGObject, dbus-python, and pycairo"
 
 elif [ "$INSTALL_MODE" = "system" ]; then
     print_info "Installing system-wide Python packages"
 
+    # Install only packages not provided by system packages
     # Try without sudo first
-    if pip install -r requirements.txt 2>/dev/null; then
+    if pip install bleak==1.1.1 bluezero 2>/dev/null; then
         print_success "Python dependencies installed (user)"
     else
         print_warning "User install failed, trying with sudo..."
-        sudo pip install -r requirements.txt
+        sudo pip install bleak==1.1.1 bluezero
         print_success "Python dependencies installed (system)"
     fi
+    print_info "Note: Using system-provided PyGObject, dbus-python, and pycairo"
 else
     print_error "Could not determine installation mode"
     exit 1

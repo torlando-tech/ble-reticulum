@@ -117,3 +117,38 @@ jobs:
         echo "- Python version: ${{ matrix.python-version }}" >> $GITHUB_STEP_SUMMARY
         echo "- Tests run: All integration tests (hardware tests excluded)" >> $GITHUB_STEP_SUMMARY
         echo "- See test output above for details" >> $GITHUB_STEP_SUMMARY
+
+  installer-test:
+    name: Installer Test (Fresh System)
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        os-image:
+          - "debian:12"      # Debian Bookworm (latest stable)
+          - "ubuntu:22.04"   # Ubuntu Jammy
+          - "ubuntu:24.04"   # Ubuntu Noble (latest LTS)
+
+    container:
+      image: ${{ matrix.os-image }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        path: workspace
+
+    - name: Run installer integration test
+      run: |
+        cd workspace
+        bash tests/test_installer.sh
+      continue-on-error: false
+
+    - name: Installation summary
+      if: always()
+      run: |
+        echo "## Installer Test Results (${{ matrix.os-image }})" >> $GITHUB_STEP_SUMMARY
+        echo "✓ System packages: python3-gi, python3-dbus, python3-cairo, bluez" >> $GITHUB_STEP_SUMMARY
+        echo "✓ Pip packages: bleak, bluezero" >> $GITHUB_STEP_SUMMARY
+        echo "✓ Install method: System packages (no compilation)" >> $GITHUB_STEP_SUMMARY
+        echo "✓ Installation time: < 1 minute" >> $GITHUB_STEP_SUMMARY

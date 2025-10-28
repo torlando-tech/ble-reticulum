@@ -52,32 +52,42 @@ The script will:
 **Debian/Ubuntu/Raspberry Pi OS:**
 ```bash
 sudo apt-get update
-sudo apt-get install python3-pip python3-dbus bluez
+sudo apt-get install python3-pip python3-gi python3-dbus python3-cairo bluez
 ```
 
 **Arch Linux:**
 ```bash
-sudo pacman -S python-pip python-dbus bluez bluez-utils
+sudo pacman -S python-pip python-gobject python-dbus python-cairo bluez bluez-utils
 ```
+
+**Why these packages?**
+- `python3-gi` / `python-gobject`: Pre-compiled PyGObject bindings (avoids lengthy compilation)
+- `python3-dbus` / `python-dbus`: D-Bus Python bindings for BlueZ communication
+- `python3-cairo` / `python-cairo`: Cairo graphics library (PyGObject dependency)
+- `bluez`: Bluetooth stack for Linux
 
 #### 2. Install Python Dependencies
 
 **IMPORTANT:** Install in the same environment as Reticulum!
 
+Since we installed system packages for PyGObject, dbus-python, and pycairo in step 1, we only need to install the pure-Python packages:
+
 **If Reticulum is in a virtual environment:**
 ```bash
 # Activate the same venv where Reticulum is installed
 source /path/to/reticulum-venv/bin/activate
-pip install -r requirements.txt
+pip install bleak==1.1.1 bluezero
 ```
 
 **If Reticulum is installed system-wide:**
 ```bash
 # Install system-wide (may need sudo)
-pip install -r requirements.txt
+pip install bleak==1.1.1 bluezero
 # OR
-sudo pip install -r requirements.txt
+sudo pip install bleak==1.1.1 bluezero
 ```
+
+**Note:** The system packages (python3-gi, python3-dbus, python3-cairo) provide PyGObject, dbus-python, and pycairo, eliminating the need for lengthy compilation from source.
 
 #### 3. Copy BLE Interface Files
 
