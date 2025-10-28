@@ -113,6 +113,8 @@ Add the BLE interface to your Reticulum configuration (`~/.reticulum/config`):
 
 For detailed configuration options, see [`examples/config_example.toml`](examples/config_example.toml).
 
+**Custom Config Directory**: If you use a custom Reticulum config directory with `--config`, the BLE interface will automatically use that directory to find its companion modules. No additional configuration needed!
+
 ### 2. Start Reticulum
 
 ```bash
