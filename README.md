@@ -33,13 +33,16 @@ git clone https://github.com/torlando-tech/ble-reticulum.git
 cd ble-reticulum
 chmod +x install.sh
 ./install.sh
+
+# For custom config directory:
+# ./install.sh --config /path/to/custom/config
 ```
 
 The script will:
 1. ✓ Detect if Reticulum is in a venv or system-wide
 2. ✓ Install system dependencies (BlueZ, dbus)
 3. ✓ Install Python packages in the correct environment
-4. ✓ Copy BLE interface files to `~/.reticulum/interfaces/`
+4. ✓ Copy BLE interface files to `~/.reticulum/interfaces/` (or custom config directory if specified)
 5. ✓ Optionally set up Bluetooth permissions
 
 ### Option B: Manual Installation
