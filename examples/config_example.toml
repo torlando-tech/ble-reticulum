@@ -1,5 +1,8 @@
 # Example Reticulum configuration with BLE interface
 # Place this in ~/.reticulum/config or /etc/reticulum/config
+#
+# Note: If you use a custom config directory with `rnsd --config /custom/path`,
+# the BLE interface will automatically detect and use that location.
 
 [reticulum]
 enable_transport = No
