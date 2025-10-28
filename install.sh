@@ -34,6 +34,31 @@ print_info() {
     echo -e "${BLUE}ℹ${NC} $1"
 }
 
+# Parse command line arguments
+CUSTOM_CONFIG_DIR=""
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --config)
+            CUSTOM_CONFIG_DIR="$2"
+            shift 2
+            ;;
+        -h|--help)
+            echo "Usage: $0 [--config CONFIG_DIR]"
+            echo ""
+            echo "Options:"
+            echo "  --config CONFIG_DIR    Install to custom Reticulum config directory"
+            echo "                         (default: ~/.reticulum)"
+            echo "  -h, --help            Show this help message"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Use --help for usage information"
+            exit 1
+            ;;
+    esac
+done
+
 # Check if running on Linux
 if [[ "$OSTYPE" != "linux-gnu"* ]]; then
     print_error "This interface only works on Linux (requires BlueZ)"
@@ -159,7 +184,17 @@ echo
 print_header "Installing BLE Interface Files"
 
 # Determine where to copy files
-INTERFACES_DIR="$HOME/.reticulum/interfaces"
+if [ -n "$CUSTOM_CONFIG_DIR" ]; then
+    # Use custom config directory if specified
+    CONFIG_DIR="$CUSTOM_CONFIG_DIR"
+    print_info "Using custom config directory: $CONFIG_DIR"
+else
+    # Default to ~/.reticulum
+    CONFIG_DIR="$HOME/.reticulum"
+    print_info "Using default config directory: $CONFIG_DIR"
+fi
+
+INTERFACES_DIR="$CONFIG_DIR/interfaces"
 
 # Create directory if it doesn't exist
 mkdir -p "$INTERFACES_DIR"
@@ -209,7 +244,7 @@ echo
 # Step 6: Configuration
 print_header "Configuration"
 
-CONFIG_FILE="$HOME/.reticulum/config"
+CONFIG_FILE="$CONFIG_DIR/config"
 
 print_info "Next steps:"
 echo
@@ -230,7 +265,11 @@ echo
 echo "2. See examples/config_example.toml for all configuration options"
 echo
 echo "3. Start Reticulum:"
-echo "   rnsd --verbose"
+if [ -n "$CUSTOM_CONFIG_DIR" ]; then
+    echo "   rnsd --config $CONFIG_DIR --verbose"
+else
+    echo "   rnsd --verbose"
+fi
 echo
 echo "4. Verify the interface is running:"
 echo "   rnstatus"

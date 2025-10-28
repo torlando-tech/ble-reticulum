@@ -49,8 +49,18 @@ try:
     _interface_dir = os.path.dirname(os.path.abspath(__file__))
 except NameError:
     # __file__ doesn't exist when loaded via exec() by Reticulum
-    # Use the default external interface directory
-    _interface_dir = os.path.expanduser("~/.reticulum/interfaces")
+    # Try to get the config directory from RNS
+    _interface_dir = None
+    try:
+        import RNS
+        if hasattr(RNS.Reticulum, 'configdir') and RNS.Reticulum.configdir:
+            _interface_dir = os.path.join(RNS.Reticulum.configdir, "interfaces")
+    except (ImportError, AttributeError):
+        pass
+
+    # Fall back to default if we couldn't get it from RNS
+    if _interface_dir is None:
+        _interface_dir = os.path.expanduser("~/.reticulum/interfaces")
 
 if _interface_dir not in sys.path:
     sys.path.insert(0, _interface_dir)
