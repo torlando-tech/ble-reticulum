@@ -52,6 +52,7 @@ pip_install() {
 # Parse command line arguments
 CUSTOM_CONFIG_DIR=""
 SKIP_BLUEZ_EXPERIMENTAL=false
+SKIP_BT_PERMISSIONS=false
 while [[ $# -gt 0 ]]; do
     case $1 in
         --config)
@@ -62,6 +63,10 @@ while [[ $# -gt 0 ]]; do
             SKIP_BLUEZ_EXPERIMENTAL=true
             shift
             ;;
+        --skip-bt-permissions)
+            SKIP_BT_PERMISSIONS=true
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -70,6 +75,8 @@ while [[ $# -gt 0 ]]; do
             echo "                            (default: ~/.reticulum)"
             echo "  --skip-experimental       Skip enabling BlueZ experimental mode"
             echo "                            WARNING: May cause BLE connection failures"
+            echo "  --skip-bt-permissions     Skip granting Bluetooth permissions"
+            echo "                            (you will need to run rnsd with sudo)"
             echo "  -h, --help               Show this help message"
             exit 0
             ;;
@@ -358,71 +365,108 @@ echo
 # Step 5: Bluetooth permissions
 print_header "Bluetooth Permissions"
 
-print_info "For BLE to work without root, Python needs network capabilities"
-echo
+# Check if user wants to skip Bluetooth permissions
+if [ "$SKIP_BT_PERMISSIONS" = true ]; then
+    print_warning "Skipping Bluetooth permissions (--skip-bt-permissions flag)"
+    print_info "You will need to run rnsd with sudo, or grant permissions manually:"
+    echo "  sudo setcap 'cap_net_raw,cap_net_admin+eip' \$(readlink -f \$(which python3))"
+    echo
+else
+    print_info "For BLE to work without root, Python needs network capabilities"
+    print_info "Automatically granting capabilities to Python..."
+    echo
 
-# Check if setcap is available
-if ! command -v setcap &> /dev/null; then
-    print_error "setcap command not found"
-    print_info "Installing libcap2-bin package..."
-
-    if command -v apt-get &> /dev/null; then
-        if [ "$EUID" -eq 0 ]; then
-            apt-get install -y libcap2-bin
-        else
-            sudo apt-get install -y libcap2-bin
-        fi
-    elif command -v pacman &> /dev/null; then
-        if [ "$EUID" -eq 0 ]; then
-            pacman -S --needed --noconfirm libcap
-        else
-            sudo pacman -S --needed --noconfirm libcap
-        fi
-    else
-        print_error "Could not install libcap2-bin/libcap automatically"
-        print_warning "Please install manually and re-run the installer"
-        echo
-    fi
-
-    # Verify setcap is now available
+    # Check if setcap is available
     if ! command -v setcap &> /dev/null; then
-        print_error "setcap still not available after installation attempt"
-        print_warning "You will need to run rnsd with sudo, or manually install libcap2-bin"
-        echo
-    else
-        print_success "setcap installed successfully"
-        echo
-    fi
-fi
+        print_error "setcap command not found"
+        print_info "Installing libcap2-bin package..."
 
-PYTHON_PATH=$(which python3)
-
-echo "The following command will grant capabilities to Python:"
-echo "  sudo setcap 'cap_net_raw,cap_net_admin+eip' $PYTHON_PATH"
-echo
-
-read -p "Grant Bluetooth permissions now? (y/N) " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    if command -v setcap &> /dev/null; then
-        sudo setcap 'cap_net_raw,cap_net_admin+eip' "$PYTHON_PATH"
-        if [ $? -eq 0 ]; then
-            print_success "Bluetooth permissions granted"
+        if command -v apt-get &> /dev/null; then
+            if [ "$EUID" -eq 0 ]; then
+                apt-get install -y libcap2-bin
+            else
+                sudo apt-get install -y libcap2-bin
+            fi
+        elif command -v pacman &> /dev/null; then
+            if [ "$EUID" -eq 0 ]; then
+                pacman -S --needed --noconfirm libcap
+            else
+                sudo pacman -S --needed --noconfirm libcap
+            fi
         else
-            print_error "Failed to grant Bluetooth permissions"
+            print_error "Could not install libcap2-bin/libcap automatically"
+            print_warning "Please install manually and re-run the installer"
+            echo
+        fi
+
+        # Verify setcap is now available
+        if ! command -v setcap &> /dev/null; then
+            print_error "setcap still not available after installation attempt"
+            print_warning "You will need to run rnsd with sudo, or manually install libcap2-bin"
+            echo
+        else
+            print_success "setcap installed successfully"
+            echo
+        fi
+    fi
+
+    if command -v setcap &> /dev/null; then
+        # Get python3 path
+        PYTHON_PATH=$(which python3)
+        print_info "Detected Python at: $PYTHON_PATH"
+
+        # Check if it's a symlink and resolve it
+        if [ -L "$PYTHON_PATH" ]; then
+            print_warning "Python3 is a symlink (setcap requires the actual binary)"
+            PYTHON_REAL=$(readlink -f "$PYTHON_PATH")
+            print_info "Resolved to actual binary: $PYTHON_REAL"
+
+            # Verify the resolved path exists and is a file
+            if [ ! -f "$PYTHON_REAL" ]; then
+                print_error "Could not resolve Python binary: $PYTHON_REAL"
+                print_warning "You may need to run rnsd with sudo"
+                echo
+            elif [ -L "$PYTHON_REAL" ]; then
+                print_error "Python path is still a symlink after resolution"
+                print_warning "Manual intervention required - you may need to run rnsd with sudo"
+                echo
+            else
+                PYTHON_PATH="$PYTHON_REAL"
+            fi
+        fi
+
+        # Grant capabilities if we have a valid path
+        if [ -f "$PYTHON_PATH" ] && [ ! -L "$PYTHON_PATH" ]; then
+            print_info "Granting capabilities to: $PYTHON_PATH"
+            sudo setcap 'cap_net_raw,cap_net_admin+eip' "$PYTHON_PATH"
+
+            if [ $? -eq 0 ]; then
+                print_success "Bluetooth permissions granted successfully"
+                # Verify capabilities were actually set
+                if command -v getcap &> /dev/null; then
+                    CAPS=$(getcap "$PYTHON_PATH" 2>/dev/null)
+                    if [ -n "$CAPS" ]; then
+                        print_info "Verified: $CAPS"
+                    fi
+                fi
+            else
+                print_error "Failed to grant Bluetooth permissions"
+                print_warning "You may need to run rnsd with sudo"
+                echo
+                print_info "To grant permissions manually, run:"
+                echo "  sudo setcap 'cap_net_raw,cap_net_admin+eip' $PYTHON_PATH"
+            fi
+        else
+            print_error "Could not determine valid Python binary path"
             print_warning "You may need to run rnsd with sudo"
         fi
     else
         print_error "setcap command not available, cannot grant permissions"
         print_warning "You will need to run rnsd with sudo"
     fi
-else
-    print_warning "Skipped. You may need to run rnsd with sudo"
-    echo "  To grant permissions later, run:"
-    echo "  sudo setcap 'cap_net_raw,cap_net_admin+eip' \$(which python3)"
-fi
 
-echo
+    echo
+fi
 
 # Step 5A: BlueZ Experimental Mode
 print_header "BlueZ Experimental Mode"
