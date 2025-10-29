@@ -242,20 +242,20 @@ print_header "Installing System Dependencies"
 if command -v apt-get &> /dev/null; then
     # Debian/Ubuntu/Raspberry Pi OS
     print_info "Detected Debian/Ubuntu-based system"
-    echo "Installing: python3-pip python3-gi python3-dbus python3-cairo bluez"
+    echo "Installing: python3-pip python3-gi python3-dbus python3-cairo bluez libcap2-bin"
     # Use sudo only if not running as root
     if [ "$EUID" -eq 0 ]; then
         apt-get update
-        apt-get install -y python3-pip python3-gi python3-dbus python3-cairo bluez
+        apt-get install -y python3-pip python3-gi python3-dbus python3-cairo bluez libcap2-bin
     else
         sudo apt-get update
-        sudo apt-get install -y python3-pip python3-gi python3-dbus python3-cairo bluez
+        sudo apt-get install -y python3-pip python3-gi python3-dbus python3-cairo bluez libcap2-bin
     fi
     print_success "System dependencies installed (using pre-compiled system packages)"
 elif command -v pacman &> /dev/null; then
     # Arch Linux
     print_info "Detected Arch Linux"
-    echo "Installing: base-devel gobject-introspection python-pip python-dbus python-cairo bluez bluez-utils"
+    echo "Installing: base-devel gobject-introspection python-pip python-dbus python-cairo bluez bluez-utils libcap"
     print_warning "Note: PyGObject will be compiled from pip due to version requirements (bluezero needs <3.52.0, Arch has 3.54.5)"
     # Use sudo only if not running as root
     if [ "$EUID" -eq 0 ]; then
@@ -263,10 +263,10 @@ elif command -v pacman &> /dev/null; then
         pacman -Sy --noconfirm
         # Skip python-gobject to avoid version conflict - pip will compile PyGObject
         # gobject-introspection provides dev files needed for PyGObject compilation
-        pacman -S --needed --noconfirm base-devel gobject-introspection python-pip python-dbus python-cairo bluez bluez-utils
+        pacman -S --needed --noconfirm base-devel gobject-introspection python-pip python-dbus python-cairo bluez bluez-utils libcap
     else
         sudo pacman -Sy --noconfirm
-        sudo pacman -S --needed --noconfirm base-devel gobject-introspection python-pip python-dbus python-cairo bluez bluez-utils
+        sudo pacman -S --needed --noconfirm base-devel gobject-introspection python-pip python-dbus python-cairo bluez bluez-utils libcap
     fi
     print_success "System dependencies installed (PyGObject will be compiled from pip)"
 else
@@ -361,6 +361,40 @@ print_header "Bluetooth Permissions"
 print_info "For BLE to work without root, Python needs network capabilities"
 echo
 
+# Check if setcap is available
+if ! command -v setcap &> /dev/null; then
+    print_error "setcap command not found"
+    print_info "Installing libcap2-bin package..."
+
+    if command -v apt-get &> /dev/null; then
+        if [ "$EUID" -eq 0 ]; then
+            apt-get install -y libcap2-bin
+        else
+            sudo apt-get install -y libcap2-bin
+        fi
+    elif command -v pacman &> /dev/null; then
+        if [ "$EUID" -eq 0 ]; then
+            pacman -S --needed --noconfirm libcap
+        else
+            sudo pacman -S --needed --noconfirm libcap
+        fi
+    else
+        print_error "Could not install libcap2-bin/libcap automatically"
+        print_warning "Please install manually and re-run the installer"
+        echo
+    fi
+
+    # Verify setcap is now available
+    if ! command -v setcap &> /dev/null; then
+        print_error "setcap still not available after installation attempt"
+        print_warning "You will need to run rnsd with sudo, or manually install libcap2-bin"
+        echo
+    else
+        print_success "setcap installed successfully"
+        echo
+    fi
+fi
+
 PYTHON_PATH=$(which python3)
 
 echo "The following command will grant capabilities to Python:"
@@ -370,8 +404,18 @@ echo
 read -p "Grant Bluetooth permissions now? (y/N) " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    sudo setcap 'cap_net_raw,cap_net_admin+eip' "$PYTHON_PATH"
-    print_success "Bluetooth permissions granted"
+    if command -v setcap &> /dev/null; then
+        sudo setcap 'cap_net_raw,cap_net_admin+eip' "$PYTHON_PATH"
+        if [ $? -eq 0 ]; then
+            print_success "Bluetooth permissions granted"
+        else
+            print_error "Failed to grant Bluetooth permissions"
+            print_warning "You may need to run rnsd with sudo"
+        fi
+    else
+        print_error "setcap command not available, cannot grant permissions"
+        print_warning "You will need to run rnsd with sudo"
+    fi
 else
     print_warning "Skipped. You may need to run rnsd with sudo"
     echo "  To grant permissions later, run:"
