@@ -3,14 +3,57 @@ name: Tests
 on:
   push:
     branches: [ "*" ]
+    paths:
+      - 'install.sh'
+      - 'src/**'
+      - 'tests/**'
+      - '.github/workflows/**'
+      - '*.txt'      # requirements files
+      - '*.toml'     # pyproject.toml
+      - '*.cfg'      # setup.cfg
+      - '*.py'       # any Python file in root
   pull_request:
     branches: [ "*" ]
+    paths:
+      - 'install.sh'
+      - 'src/**'
+      - 'tests/**'
+      - '.github/workflows/**'
+      - '*.txt'      # requirements files
+      - '*.toml'     # pyproject.toml
+      - '*.cfg'      # setup.cfg
+      - '*.py'       # any Python file in root
 
 jobs:
+  # Detect which files changed to run only relevant tests
+  detect-changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      python: ${{ steps.filter.outputs.python }}
+      installer: ${{ steps.filter.outputs.installer }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v2
+        id: filter
+        with:
+          filters: |
+            python:
+              - 'src/**/*.py'
+              - 'tests/test_*.py'
+              - '*.txt'
+              - '*.toml'
+              - '*.cfg'
+            installer:
+              - 'install.sh'
+              - 'tests/test_installer.sh'
+              - '.github/workflows/test.yml'
+
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
-    if: false  # Temporarily disabled to save CI minutes while troubleshooting installer tests
+    needs: detect-changes
+    if: needs.detect-changes.outputs.python == 'true'
 
     strategy:
       matrix:
@@ -62,7 +105,8 @@ jobs:
   integration-tests:
     name: Integration Tests
     runs-on: ubuntu-latest
-    if: false  # Temporarily disabled to save CI minutes while troubleshooting installer tests
+    needs: detect-changes
+    if: needs.detect-changes.outputs.python == 'true'
 
     strategy:
       matrix:
@@ -123,6 +167,8 @@ jobs:
   installer-test:
     name: Installer Test (Fresh System)
     runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.installer == 'true'
 
     strategy:
       fail-fast: false
@@ -164,3 +210,68 @@ jobs:
         echo "✓ Pip packages: bleak, bluezero" >> $GITHUB_STEP_SUMMARY
         echo "✓ Install method: System packages (no compilation)" >> $GITHUB_STEP_SUMMARY
         echo "✓ Installation time: < 1 minute" >> $GITHUB_STEP_SUMMARY
+
+  installer-test-arm:
+    name: Installer Test (Raspberry Pi OS - ARM)
+    runs-on: ubuntu-latest
+    # Only run on pull requests to main branch
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    timeout-minutes: 20  # ARM emulation is slower, allow extra time
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Raspberry Pi OS 32-bit (armhf/armv7)
+          # Based on Debian Bookworm - matches Raspberry Pi OS Lite 32-bit
+          - os-image: "arm32v7/debian:bookworm"
+            platform: "linux/arm/v7"
+            arch-name: "Raspberry Pi OS 32-bit (armhf)"
+
+          # Raspberry Pi OS 64-bit (arm64/aarch64)
+          # Based on Debian Bookworm - matches Raspberry Pi OS Lite 64-bit
+          - os-image: "arm64v8/debian:bookworm"
+            platform: "linux/arm64"
+            arch-name: "Raspberry Pi OS 64-bit (arm64)"
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+      with:
+        platforms: arm,arm64
+
+    - name: Run installer test on ${{ matrix.arch-name }}
+      run: |
+        docker run --rm \
+          --platform ${{ matrix.platform }} \
+          -v $PWD:/workspace \
+          -w /workspace \
+          -e DEBIAN_FRONTEND=noninteractive \
+          -e DEBCONF_NONINTERACTIVE_SEEN=true \
+          -e TZ=UTC \
+          ${{ matrix.os-image }} \
+          bash tests/test_installer.sh
+      continue-on-error: false
+
+    - name: Installation summary
+      if: always()
+      run: |
+        echo "## ARM Installer Test Results" >> $GITHUB_STEP_SUMMARY
+        echo "**Architecture:** ${{ matrix.arch-name }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Platform:** ${{ matrix.platform }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Base Image:** ${{ matrix.os-image }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        if [[ "${{ matrix.platform }}" == "linux/arm/v7" ]]; then
+          echo "✓ System packages: python3-gi, python3-dbus, python3-cairo, bluez, libffi-dev" >> $GITHUB_STEP_SUMMARY
+          echo "✓ libffi-dev included for 32-bit ARM cffi compilation" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "✓ System packages: python3-gi, python3-dbus, python3-cairo, bluez" >> $GITHUB_STEP_SUMMARY
+        fi
+        echo "✓ Pip packages: bleak==1.1.1, bluezero" >> $GITHUB_STEP_SUMMARY
+        echo "✓ BLE interface files copied" >> $GITHUB_STEP_SUMMARY
+        echo "✓ BlueZ experimental mode configured" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "_Note: Tests run via QEMU emulation (2-5x slower than native)_" >> $GITHUB_STEP_SUMMARY
