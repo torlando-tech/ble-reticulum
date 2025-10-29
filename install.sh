@@ -653,18 +653,18 @@ if command -v bluetoothctl &> /dev/null; then
     fi
 
     # Check if adapter is powered
-    if bluetoothctl show | grep -q "Powered: yes"; then
+    if bluetoothctl show 2>/dev/null | grep -q "Powered: yes"; then
         print_success "Bluetooth adapter is powered on"
     else
         print_warning "Bluetooth adapter is not powered"
         print_info "Powering on Bluetooth adapter..."
 
-        # Power on the adapter
-        echo -e "power on\nquit" | bluetoothctl > /dev/null 2>&1
+        # Power on the adapter (non-fatal in container/CI environments where D-Bus may not be running)
+        echo -e "power on\nquit" | bluetoothctl > /dev/null 2>&1 || true
 
         # Verify it worked
         sleep 1
-        if bluetoothctl show | grep -q "Powered: yes"; then
+        if bluetoothctl show 2>/dev/null | grep -q "Powered: yes"; then
             print_success "Bluetooth adapter powered on successfully"
         else
             print_error "Failed to power on Bluetooth adapter"
