@@ -104,8 +104,14 @@ if command -v apt-get &> /dev/null; then
 
     if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
         print_info "Installing basic prerequisites: ${MISSING_PACKAGES[*]}"
-        sudo apt-get update -qq
-        sudo apt-get install -y -q ${MISSING_PACKAGES[*]}
+        # Use sudo only if not running as root (Debian containers run as root without sudo)
+        if [ "$EUID" -eq 0 ]; then
+            apt-get update -qq
+            apt-get install -y -q ${MISSING_PACKAGES[*]}
+        else
+            sudo apt-get update -qq
+            sudo apt-get install -y -q ${MISSING_PACKAGES[*]}
+        fi
         print_success "Basic prerequisites installed"
     else
         print_success "Basic prerequisites already installed"
@@ -121,7 +127,12 @@ elif command -v pacman &> /dev/null; then
 
     if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
         print_info "Installing basic prerequisites: ${MISSING_PACKAGES[*]}"
-        sudo pacman -S --noconfirm ${MISSING_PACKAGES[*]}
+        # Use sudo only if not running as root
+        if [ "$EUID" -eq 0 ]; then
+            pacman -S --noconfirm ${MISSING_PACKAGES[*]}
+        else
+            sudo pacman -S --noconfirm ${MISSING_PACKAGES[*]}
+        fi
         print_success "Basic prerequisites installed"
     else
         print_success "Basic prerequisites already installed"
@@ -200,14 +211,25 @@ if command -v apt-get &> /dev/null; then
     # Debian/Ubuntu/Raspberry Pi OS
     print_info "Detected Debian/Ubuntu-based system"
     echo "Installing: python3-pip python3-gi python3-dbus python3-cairo bluez"
-    sudo apt-get update
-    sudo apt-get install -y python3-pip python3-gi python3-dbus python3-cairo bluez
+    # Use sudo only if not running as root
+    if [ "$EUID" -eq 0 ]; then
+        apt-get update
+        apt-get install -y python3-pip python3-gi python3-dbus python3-cairo bluez
+    else
+        sudo apt-get update
+        sudo apt-get install -y python3-pip python3-gi python3-dbus python3-cairo bluez
+    fi
     print_success "System dependencies installed (using pre-compiled system packages)"
 elif command -v pacman &> /dev/null; then
     # Arch Linux
     print_info "Detected Arch Linux"
     echo "Installing: python-pip python-gobject python-dbus python-cairo bluez bluez-utils"
-    sudo pacman -S --noconfirm python-pip python-gobject python-dbus python-cairo bluez bluez-utils
+    # Use sudo only if not running as root
+    if [ "$EUID" -eq 0 ]; then
+        pacman -S --noconfirm python-pip python-gobject python-dbus python-cairo bluez bluez-utils
+    else
+        sudo pacman -S --noconfirm python-pip python-gobject python-dbus python-cairo bluez bluez-utils
+    fi
     print_success "System dependencies installed (using pre-compiled system packages)"
 else
     print_warning "Could not detect package manager"
