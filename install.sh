@@ -624,6 +624,24 @@ print_header "Bluetooth Adapter Power State"
 if command -v bluetoothctl &> /dev/null; then
     print_info "Checking Bluetooth adapter power state..."
 
+    # Check for rfkill blocks first (must be unblocked before power-on works)
+    if command -v rfkill &> /dev/null; then
+        if rfkill list bluetooth | grep -q "Soft blocked: yes"; then
+            print_warning "Bluetooth adapter is soft-blocked by rfkill"
+            print_info "Unblocking Bluetooth adapter..."
+            sudo rfkill unblock bluetooth
+            sleep 1
+
+            # Verify unblock succeeded
+            if rfkill list bluetooth | grep -q "Soft blocked: yes"; then
+                print_error "Failed to unblock Bluetooth adapter"
+                print_warning "You may need to check hardware switch or BIOS settings"
+            else
+                print_success "Bluetooth adapter unblocked successfully"
+            fi
+        fi
+    fi
+
     # Check if adapter is powered
     if bluetoothctl show | grep -q "Powered: yes"; then
         print_success "Bluetooth adapter is powered on"
