@@ -4,6 +4,14 @@
 
 set -e
 
+# Configure non-interactive mode for CI/container environments
+export DEBIAN_FRONTEND=noninteractive
+export DEBCONF_NONINTERACTIVE_SEEN=true
+export TZ=UTC
+
+# Pre-configure timezone to prevent interactive prompts
+ln -fs /usr/share/zoneinfo/UTC /etc/localtime
+
 echo "=== Testing install.sh on fresh system ==="
 echo "OS: $(cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2 | tr -d '"')"
 echo ""
@@ -11,7 +19,10 @@ echo ""
 # Step 1: Install prerequisites (what a user would have)
 echo "Step 1: Installing base prerequisites..."
 apt-get update -qq
-apt-get install -y sudo python3 python3-pip git
+apt-get install -y -q \
+    -o DPkg::Pre-Install-Pkgs::=/bin/true \
+    -o DPkg::Post-Install-Pkgs::=/bin/true \
+    sudo python3 python3-pip git
 
 # Install Reticulum (prerequisite for BLE interface)
 echo "Installing Reticulum..."

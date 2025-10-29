@@ -65,6 +65,12 @@ if [[ "$OSTYPE" != "linux-gnu"* ]]; then
     exit 1
 fi
 
+# Detect CI environment and configure non-interactive mode
+if [[ -n "$CI" ]] || [[ -n "$GITHUB_ACTIONS" ]] || [[ -n "$DEBIAN_FRONTEND" ]]; then
+    export DEBIAN_FRONTEND=noninteractive
+    export DEBCONF_NONINTERACTIVE_SEEN=true
+fi
+
 print_header "Reticulum BLE Interface Installer"
 echo
 

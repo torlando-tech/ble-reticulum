@@ -131,6 +131,10 @@ jobs:
 
     container:
       image: ${{ matrix.os-image }}
+      env:
+        DEBIAN_FRONTEND: noninteractive
+        DEBCONF_NONINTERACTIVE_SEEN: "true"
+        TZ: UTC
 
     steps:
     - name: Checkout code
