@@ -74,8 +74,8 @@ if [ "$OS_TYPE" = "debian" ]; then
     check_package bluez
     echo "  ✓ bluez installed"
 elif [ "$OS_TYPE" = "arch" ]; then
-    check_package python-gobject
-    echo "  ✓ python-gobject installed"
+    # Note: python-gobject NOT installed on Arch to avoid version conflict
+    # PyGObject compiled from pip instead
     check_package python-dbus
     echo "  ✓ python-dbus installed"
     check_package python-cairo
@@ -163,10 +163,11 @@ if [ "$OS_TYPE" = "debian" ]; then
     echo "  • System packages: python3, python3-pip, git, python3-gi, python3-dbus, python3-cairo, bluez"
     echo "  • Pip packages: rns, bleak, bluezero"
     echo "  • Install method: System packages (no compilation)"
+    echo "  • Installation time: < 1 minute"
 elif [ "$OS_TYPE" = "arch" ]; then
-    echo "  • System packages: python, python-pip, git, python-gobject, python-dbus, python-cairo, bluez, bluez-utils, base-devel"
-    echo "  • Pip packages: rns, bleak, bluezero (PyGObject compiled during bluezero install)"
-    echo "  • Install method: System packages + compilation (base-devel provides build tools)"
+    echo "  • System packages: python, python-pip, git, python-dbus, python-cairo, bluez, bluez-utils, base-devel"
+    echo "  • Pip packages: rns, bleak, bluezero, PyGObject (compiled)"
+    echo "  • Install method: System packages + PyGObject compilation (version compatibility)"
+    echo "  • Installation time: ~2-3 minutes (PyGObject compilation)"
 fi
-echo "  • Installation time: Fast (< 2 minutes on Debian/Ubuntu, ~3 minutes on Arch)"
 echo ""
