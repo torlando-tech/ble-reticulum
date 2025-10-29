@@ -269,17 +269,18 @@ if command -v apt-get &> /dev/null; then
 
     # Detect architecture for platform-specific dependencies
     ARCH=$(dpkg --print-architecture 2>/dev/null || echo "unknown")
+    print_info "Detected architecture: $ARCH"
+
     PACKAGES="python3-pip python3-gi python3-dbus python3-cairo bluez libcap2-bin"
 
     # Add libffi-dev only for 32-bit ARM (armhf) - needed for cffi compilation
     # x86_64 and arm64 have pre-built cffi wheels available
     if [[ "$ARCH" == "armhf" ]]; then
         PACKAGES="$PACKAGES libffi-dev"
-        echo "Installing: $PACKAGES"
-        print_info "Note: Including libffi-dev for 32-bit ARM cffi compilation"
-    else
-        echo "Installing: $PACKAGES"
+        print_info "32-bit ARM detected - adding libffi-dev for cffi compilation"
     fi
+
+    echo "Installing: $PACKAGES"
 
     # Use sudo only if not running as root
     if [ "$EUID" -eq 0 ]; then
