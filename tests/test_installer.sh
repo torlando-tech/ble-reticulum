@@ -26,13 +26,14 @@ apt-get install -y -q \
 
 # Install Reticulum (prerequisite for BLE interface)
 echo "Installing Reticulum..."
-pip3 install rns --break-system-packages 2>&1 | grep -v "WARNING" || true
+pip3 install rns 2>&1 | grep -v "WARNING" || true
 
 echo ""
 
 # Step 2: Run installer
 echo "Step 2: Running install.sh..."
-cd /workspace
+# Navigate to repository root (script is in tests/ directory)
+cd "$(dirname "$0")/.."
 chmod +x install.sh
 mkdir -p /tmp/test-config
 
