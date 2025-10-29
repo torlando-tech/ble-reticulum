@@ -687,13 +687,13 @@ echo "   File: $CONFIG_FILE"
 echo
 echo "   Add this section (copy-paste ready):"
 echo
-echo "   [[BLE Interface]]"
-echo "     type = BLEInterface"
-echo "     enabled = yes"
+echo "  [[BLE Interface]]"
+echo "    type = BLEInterface"
+echo "    enabled = yes"
 echo
-echo "     # Enable both modes for mesh"
-echo "     enable_peripheral = yes"
-echo "     enable_central = yes"
+echo "    # Enable both modes for mesh"
+echo "    enable_peripheral = yes"
+echo "    enable_central = yes"
 echo
 echo "2. See examples/config_example.toml for all configuration options"
 echo
