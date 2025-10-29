@@ -71,7 +71,7 @@ echo ""
 
 # Check pip packages
 echo "Checking pip-installed packages..."
-python3 -c "import bleak; print('  ✓ bleak version:', bleak.__version__)" || { echo "FAIL: Cannot import bleak"; exit 1; }
+python3 -c "import bleak; print('  ✓ bleak imported successfully')" || { echo "FAIL: Cannot import bleak"; exit 1; }
 python3 -c "import bluezero; print('  ✓ bluezero imported successfully')" || { echo "FAIL: Cannot import bluezero"; exit 1; }
 
 echo ""
