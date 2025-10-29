@@ -158,6 +158,11 @@ RNS_VENV=""
 RNS_PYTHON=""
 INSTALL_MODE=""
 
+# Add user's local bin to PATH if it exists (common pip install location)
+if [ -d "$HOME/.local/bin" ]; then
+    export PATH="$HOME/.local/bin:$PATH"
+fi
+
 # Check if rnsd is available
 if command -v rnsd &> /dev/null; then
     print_success "Found rnsd command"
@@ -197,9 +202,25 @@ else
     # Install Reticulum using our pip helper function
     pip_install rns
 
-    # Verify installation
+    # Add user's local bin to PATH (pip may install there)
+    export PATH="$HOME/.local/bin:$PATH"
+
+    # Verify installation (check multiple locations and Python import)
     if command -v rnsd &> /dev/null; then
         print_success "Reticulum installed successfully"
+        INSTALL_MODE="system"
+        RNS_PYTHON="python3"
+    elif [ -f "$HOME/.local/bin/rnsd" ]; then
+        print_success "Reticulum installed successfully (user installation)"
+        print_info "rnsd location: $HOME/.local/bin/rnsd"
+        INSTALL_MODE="system"
+        RNS_PYTHON="python3"
+        # Ensure it's executable
+        chmod +x "$HOME/.local/bin/rnsd" 2>/dev/null || true
+    elif python3 -c "import RNS" 2>/dev/null; then
+        print_warning "Reticulum Python package installed, but rnsd command not found in PATH"
+        print_info "You may need to add ~/.local/bin to your PATH"
+        echo "  Add to ~/.bashrc: export PATH=\"\$HOME/.local/bin:\$PATH\""
         INSTALL_MODE="system"
         RNS_PYTHON="python3"
     else
@@ -207,6 +228,7 @@ else
         echo
         echo "Please try installing manually:"
         echo "  pip install rns"
+        echo "  # Then add to PATH: export PATH=\"\$HOME/.local/bin:\$PATH\""
         echo "Or visit: https://reticulum.network"
         exit 1
     fi
@@ -514,14 +536,26 @@ echo "   └──────────────────────�
 echo
 echo "2. See examples/config_example.toml for all configuration options"
 echo
-echo "3. Start Reticulum:"
+
+# Add PATH note if rnsd is in user's local bin
+STEP_NUM=3
+if [ -f "$HOME/.local/bin/rnsd" ] && [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+    echo "3. Add ~/.local/bin to your PATH (for rnsd command):"
+    echo "   echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc"
+    echo "   source ~/.bashrc"
+    echo
+    STEP_NUM=4
+fi
+
+echo "$STEP_NUM. Start Reticulum:"
 if [ -n "$CUSTOM_CONFIG_DIR" ]; then
     echo "   rnsd --config $CONFIG_DIR --verbose"
 else
     echo "   rnsd --verbose"
 fi
 echo
-echo "4. Verify the interface is running:"
+STEP_NUM=$((STEP_NUM + 1))
+echo "$STEP_NUM. Verify the interface is running:"
 echo "   rnstatus"
 echo
 
