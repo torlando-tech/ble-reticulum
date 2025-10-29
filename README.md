@@ -39,9 +39,9 @@ chmod +x install.sh
 ```
 
 The script will:
-1. ✓ Detect if Reticulum is in a venv or system-wide
-2. ✓ Install system dependencies (BlueZ, dbus)
-3. ✓ Install Python packages in the correct environment
+1. ✓ Detect if Reticulum is in a venv, pipx, or system-wide
+2. ✓ Install system dependencies (BlueZ, dbus, build tools if needed)
+3. ✓ Install Python packages in the correct environment (via pipx inject if needed)
 4. ✓ Copy BLE interface files to `~/.reticulum/interfaces/` (or custom config directory if specified)
 5. ✓ Enable BlueZ experimental mode (required for proper BLE connectivity)
 6. ✓ Optionally set up Bluetooth permissions
@@ -153,6 +153,8 @@ sudo setcap 'cap_net_raw,cap_net_admin+eip' /path/to/venv/bin/python3
 ### Option C: pipx Installation (RNS installed via pipx)
 
 If you installed Reticulum via `pipx install rns`, the BLE interface requires additional setup because pipx creates isolated virtual environments that cannot access system-installed packages.
+
+**Note:** The automated installation script (Option A: `./install.sh`) now detects and handles pipx installations automatically. The instructions below are for manual installation or troubleshooting.
 
 #### 1. Install System Dependencies
 
