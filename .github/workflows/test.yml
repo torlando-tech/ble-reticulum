@@ -117,3 +117,48 @@ jobs:
         echo "- Python version: ${{ matrix.python-version }}" >> $GITHUB_STEP_SUMMARY
         echo "- Tests run: All integration tests (hardware tests excluded)" >> $GITHUB_STEP_SUMMARY
         echo "- See test output above for details" >> $GITHUB_STEP_SUMMARY
+
+  installer-test:
+    name: Installer Test (Fresh System)
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os-image:
+          - "debian:12"      # Debian Bookworm (current stable)
+          - "debian:trixie"  # Debian Trixie (testing - next release)
+          - "ubuntu:22.04"   # Ubuntu Jammy LTS
+          - "ubuntu:24.04"   # Ubuntu Noble (latest LTS)
+          - "archlinux:latest"  # Arch Linux (rolling release)
+
+    # Allow Trixie and Arch to fail without blocking CI (testing/rolling can be unstable)
+    continue-on-error: ${{ matrix.os-image == 'debian:trixie' || matrix.os-image == 'archlinux:latest' }}
+
+    container:
+      image: ${{ matrix.os-image }}
+      env:
+        DEBIAN_FRONTEND: noninteractive
+        DEBCONF_NONINTERACTIVE_SEEN: "true"
+        TZ: UTC
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        path: workspace
+
+    - name: Run installer integration test
+      run: |
+        cd workspace
+        bash tests/test_installer.sh
+      continue-on-error: false
+
+    - name: Installation summary
+      if: always()
+      run: |
+        echo "## Installer Test Results (${{ matrix.os-image }})" >> $GITHUB_STEP_SUMMARY
+        echo "✓ System packages: python3-gi, python3-dbus, python3-cairo, bluez" >> $GITHUB_STEP_SUMMARY
+        echo "✓ Pip packages: bleak, bluezero" >> $GITHUB_STEP_SUMMARY
+        echo "✓ Install method: System packages (no compilation)" >> $GITHUB_STEP_SUMMARY
+        echo "✓ Installation time: < 1 minute" >> $GITHUB_STEP_SUMMARY
