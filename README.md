@@ -150,6 +150,97 @@ sudo setcap 'cap_net_raw,cap_net_admin+eip' $(which python3)
 sudo setcap 'cap_net_raw,cap_net_admin+eip' /path/to/venv/bin/python3
 ```
 
+### Option C: pipx Installation (RNS installed via pipx)
+
+If you installed Reticulum via `pipx install rns`, the BLE interface requires additional setup because pipx creates isolated virtual environments that cannot access system-installed packages.
+
+#### 1. Install System Dependencies
+
+**Arch Linux:**
+```bash
+sudo pacman -S base-devel gobject-introspection python-dbus python-cairo bluez bluez-utils
+```
+
+**Debian/Ubuntu/Raspberry Pi OS:**
+```bash
+sudo apt-get update
+sudo apt-get install build-essential python3-dev python3-gi python3-dbus python3-cairo bluez libdbus-1-dev
+```
+
+#### 2. Inject BLE Dependencies into pipx Environment
+
+Because pipx creates isolated environments, you must inject the BLE dependencies into the RNS environment:
+
+```bash
+# Inject BLE dependencies into pipx RNS environment
+pipx inject rns bleak==1.1.1 bluezero dbus-python
+```
+
+**Note:** This will compile `dbus-python` from source, which requires the system development libraries installed in step 1.
+
+#### 3. Copy BLE Interface Files
+
+```bash
+# Copy to Reticulum's interface directory
+mkdir -p ~/.reticulum/interfaces
+cp src/RNS/Interfaces/BLE*.py ~/.reticulum/interfaces/
+```
+
+#### 4. Grant Bluetooth Permissions
+
+Find the Python executable used by pipx for RNS:
+
+```bash
+# Find pipx RNS Python path
+PIPX_RNS_PYTHON=$(pipx runpip rns show rns | grep Location | awk '{print $2}' | sed 's/lib\/python.*/bin\/python3/')
+
+# Grant capabilities
+sudo setcap 'cap_net_raw,cap_net_admin+eip' "$PIPX_RNS_PYTHON"
+```
+
+Alternatively, find the path manually:
+```bash
+# List pipx environments
+ls ~/.local/pipx/venvs/
+
+# Grant capabilities to the rns venv Python
+sudo setcap 'cap_net_raw,cap_net_admin+eip' ~/.local/pipx/venvs/rns/bin/python3
+```
+
+#### 5. Enable BlueZ Experimental Mode
+
+The BLE interface requires BlueZ experimental features for proper BLE connectivity:
+
+```bash
+# Edit BlueZ service configuration
+sudo systemctl edit bluetooth.service
+```
+
+Add the following content:
+```ini
+[Service]
+ExecStart=
+ExecStart=/usr/lib/bluetooth/bluetoothd --experimental
+```
+
+Then reload and restart:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart bluetooth.service
+
+# Verify experimental mode is enabled
+systemctl status bluetooth.service | grep -i experimental
+```
+
+#### Why pipx Requires Special Handling
+
+pipx creates isolated virtual environments with `--no-site-packages` to prevent package conflicts. This means:
+- System packages like `python-dbus` (installed via apt/pacman) are not accessible
+- `dbus-python` must be compiled from source within the pipx environment
+- `pipx inject` installs packages directly into RNS's isolated environment
+
+This isolation is intentional and prevents conflicts, but requires the extra injection step for system-dependent packages like `dbus-python`.
+
 ## Quick Start
 
 ### 1. Configure Reticulum
@@ -297,6 +388,20 @@ sudo systemctl start bluetooth
 
 The automated installer (v1.x+) automatically checks and powers on the Bluetooth adapter during installation.
 
+### pipx: ModuleNotFoundError for dbus, gi, or bluezero
+If you installed RNS via pipx and get import errors like `ModuleNotFoundError: No module named 'dbus'`, `No module named 'gi'`, or `No module named 'bluezero'`:
+
+**Cause:** pipx creates isolated environments that don't access system packages.
+
+**Solution:** Follow the [pipx installation instructions](#option-c-pipx-installation-rns-installed-via-pipx) to inject the required dependencies:
+```bash
+pipx inject rns bleak==1.1.1 bluezero dbus-python
+```
+
+**Verification:** Test if the modules are accessible:
+```bash
+pipx run rns python3 -c "import dbus, gi, bleak, bluezero; print('All modules found')"
+```
 ## Architecture
 
 The BLE interface consists of four main components:
