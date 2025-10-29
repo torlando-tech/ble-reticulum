@@ -266,6 +266,15 @@ power_mode = balanced
 #    - If you used install.sh, it should have enabled this automatically
 #    - Verify: ps aux | grep bluetoothd (should show -E flag)
 #
+# 7. Bluetooth adapter not powered (No powered Bluetooth adapters found):
+#    IMPORTANT: BLE interface won't work if adapter is powered off!
+#    - Symptoms: "Not Powered" errors, interface fails to start, no peer discovery
+#    - Solution: bluetoothctl power on
+#    - Verify: bluetoothctl show (should display "Powered: yes")
+#    - For automatic power-on at boot: see examples/bluetooth-power-on.service
+#    - If blocked: sudo rfkill unblock bluetooth
+#    - The installer (v1.x+) automatically powers on the adapter
+#
 # For more troubleshooting, see README.md
 
 # ============================================================================

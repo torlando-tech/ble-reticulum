@@ -250,6 +250,50 @@ These errors occur when BlueZ attempts Classic Bluetooth (BR/EDR) connections in
 **Solution:**
 Enable BlueZ experimental mode (see Installation → Manual Installation → step 4). If you used the automated installer, re-run it without `--skip-experimental`.
 
+### Bluetooth adapter not powered / "No powered Bluetooth adapters found"
+The Bluetooth adapter exists but is powered off, preventing BLE operations.
+
+**Symptoms:**
+- Error: `dbus.exceptions.DBusException: org.bluez.Error.Failed: Not Powered`
+- Error: `BleakError: No powered Bluetooth adapters found.`
+- BLE interface fails to start or discover peers
+- GATT server startup fails immediately
+
+**Cause:**
+The Bluetooth adapter is in a powered-off state. This commonly happens on Raspberry Pi after boot or system updates.
+
+**Solution:**
+Power on the Bluetooth adapter:
+
+```bash
+# Option 1: Using bluetoothctl (recommended)
+bluetoothctl power on
+
+# Option 2: If adapter is RF-blocked
+sudo rfkill unblock bluetooth
+
+# Option 3: Using hciconfig (older systems)
+sudo hciconfig hci0 up
+
+# Verify adapter is powered:
+bluetoothctl show
+# Should display "Powered: yes"
+```
+
+**Automatic power-on at boot:**
+Ensure Bluetooth service is enabled and starts at boot:
+
+```bash
+# Enable Bluetooth service
+sudo systemctl enable bluetooth
+sudo systemctl start bluetooth
+
+# For persistent power-on, create a systemd service:
+# See examples/bluetooth-power-on.service
+```
+
+The automated installer (v1.x+) automatically checks and powers on the Bluetooth adapter during installation.
+
 ## Architecture
 
 The BLE interface consists of four main components:

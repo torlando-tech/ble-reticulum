@@ -1,0 +1,12 @@
+[Unit]
+Description=Ensure Bluetooth adapter is powered on at boot
+After=bluetooth.service
+Requires=bluetooth.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo -e "power on\nquit" | /usr/bin/bluetoothctl'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

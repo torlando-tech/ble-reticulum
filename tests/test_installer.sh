@@ -48,6 +48,7 @@ check_package() {
 echo "Running install.sh (self-contained installer)..."
 # Navigate to repository root (script is in tests/ directory)
 cd "$(dirname "$0")/.."
+REPO_ROOT="$(pwd)"
 chmod +x install.sh
 mkdir -p /tmp/test-config
 
@@ -184,7 +185,7 @@ echo ""
 
 # Test --skip-experimental flag
 echo "Testing --skip-experimental flag..."
-cd "$(dirname "$0")/.."
+cd "$REPO_ROOT"
 # Run with --skip-experimental to verify it doesn't fail
 ./install.sh --config /tmp/test-config-skip --skip-experimental > /tmp/skip-test.log 2>&1 <<EOF
 n
