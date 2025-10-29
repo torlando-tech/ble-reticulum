@@ -130,9 +130,10 @@ jobs:
           - "debian:trixie"  # Debian Trixie (testing - next release)
           - "ubuntu:22.04"   # Ubuntu Jammy LTS
           - "ubuntu:24.04"   # Ubuntu Noble (latest LTS)
+          - "archlinux:latest"  # Arch Linux (rolling release)
 
-    # Allow Trixie to fail without blocking CI (testing can be unstable)
-    continue-on-error: ${{ matrix.os-image == 'debian:trixie' }}
+    # Allow Trixie and Arch to fail without blocking CI (testing/rolling can be unstable)
+    continue-on-error: ${{ matrix.os-image == 'debian:trixie' || matrix.os-image == 'archlinux:latest' }}
 
     container:
       image: ${{ matrix.os-image }}
