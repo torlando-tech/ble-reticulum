@@ -57,11 +57,12 @@ sudo apt-get install python3-pip python3-gi python3-dbus python3-cairo bluez
 
 **Arch Linux:**
 ```bash
-sudo pacman -S base-devel python-pip python-dbus python-cairo bluez bluez-utils
+sudo pacman -S base-devel gobject-introspection python-pip python-dbus python-cairo bluez bluez-utils
 ```
 
 **Why these packages?**
-- `base-devel`: Build tools (gcc, make, meson) required for compiling PyGObject from pip
+- `base-devel`: Build tools (gcc, make, meson) required for compiling PyGObject
+- `gobject-introspection`: Development files for GObject introspection (required for PyGObject compilation)
 - `python-dbus`: D-Bus Python bindings for BlueZ communication
 - `python-cairo`: Cairo graphics library
 - `bluez` / `bluez-utils`: Bluetooth stack and utilities for Linux

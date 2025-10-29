@@ -226,17 +226,18 @@ if command -v apt-get &> /dev/null; then
 elif command -v pacman &> /dev/null; then
     # Arch Linux
     print_info "Detected Arch Linux"
-    echo "Installing: base-devel python-pip python-dbus python-cairo bluez bluez-utils"
+    echo "Installing: base-devel gobject-introspection python-pip python-dbus python-cairo bluez bluez-utils"
     print_warning "Note: PyGObject will be compiled from pip due to version requirements (bluezero needs <3.52.0, Arch has 3.54.5)"
     # Use sudo only if not running as root
     if [ "$EUID" -eq 0 ]; then
         # Sync package database first (may have been synced in basic prereqs, but ensure it's current)
         pacman -Sy --noconfirm
         # Skip python-gobject to avoid version conflict - pip will compile PyGObject
-        pacman -S --needed --noconfirm base-devel python-pip python-dbus python-cairo bluez bluez-utils
+        # gobject-introspection provides dev files needed for PyGObject compilation
+        pacman -S --needed --noconfirm base-devel gobject-introspection python-pip python-dbus python-cairo bluez bluez-utils
     else
         sudo pacman -Sy --noconfirm
-        sudo pacman -S --needed --noconfirm base-devel python-pip python-dbus python-cairo bluez bluez-utils
+        sudo pacman -S --needed --noconfirm base-devel gobject-introspection python-pip python-dbus python-cairo bluez bluez-utils
     fi
     print_success "System dependencies installed (PyGObject will be compiled from pip)"
 else
