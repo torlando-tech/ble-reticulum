@@ -253,6 +253,19 @@ power_mode = balanced
 #    - Restart Bluetooth service (Linux: sudo systemctl restart bluetooth)
 #    - Check device_name is not too long (max ~20 characters)
 #
+# 6. BR/EDR connection errors (br-connection-profile-unavailable, ProfileUnavailable):
+#    IMPORTANT: This is the most common BLE connection issue!
+#    - Symptoms: Devices connect then immediately disconnect, "ConnectDevice() unavailable" in logs
+#    - Cause: BlueZ attempting Classic Bluetooth (BR/EDR) instead of BLE (LE) connections
+#    - Solution: Enable BlueZ experimental mode (required for proper BLE connectivity)
+#      Linux: sudo systemctl edit bluetooth
+#      Add:   [Service]
+#             ExecStart=
+#             ExecStart=/usr/lib/bluetooth/bluetoothd -E
+#      Then:  sudo systemctl daemon-reload && sudo systemctl restart bluetooth
+#    - If you used install.sh, it should have enabled this automatically
+#    - Verify: ps aux | grep bluetoothd (should show -E flag)
+#
 # For more troubleshooting, see README.md
 
 # ============================================================================

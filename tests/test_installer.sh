@@ -52,6 +52,7 @@ chmod +x install.sh
 mkdir -p /tmp/test-config
 
 # Run non-interactively (answer 'n' to bluetooth permissions prompt)
+# Note: BlueZ experimental mode will be enabled by default (no prompt)
 ./install.sh --config /tmp/test-config <<EOF
 n
 EOF
@@ -152,6 +153,49 @@ echo ""
 echo "Testing BLE interface import..."
 cd /tmp/test-config/interfaces
 python3 -c "import sys; sys.path.insert(0, '.'); from BLEInterface import BLEInterface; print('  ✓ BLEInterface imported successfully')" || { echo "FAIL: Cannot import BLEInterface"; exit 1; }
+
+echo ""
+
+# Check BlueZ experimental mode configuration
+echo "Checking BlueZ experimental mode..."
+if command -v systemctl &> /dev/null && command -v bluetoothctl &> /dev/null; then
+    # systemctl is available - check if experimental mode was configured
+    if [ -f /etc/systemd/system/bluetooth.service.d/override.conf ]; then
+        echo "  ✓ Systemd override file created"
+        if grep -q -- "-E" /etc/systemd/system/bluetooth.service.d/override.conf; then
+            echo "  ✓ Experimental mode flag (-E) configured"
+        else
+            echo "  ⚠ WARNING: Override file exists but -E flag not found"
+        fi
+    else
+        # No override file - may have been already enabled or not supported
+        if systemctl status bluetooth 2>/dev/null | grep -q -- "-E\|--experimental"; then
+            echo "  ✓ Experimental mode already enabled (not via installer)"
+        else
+            echo "  ⚠ WARNING: Experimental mode not configured"
+        fi
+    fi
+else
+    # systemctl or bluetoothctl not available (container environment)
+    echo "  ℹ Systemd/BlueZ not available (container environment - OK)"
+fi
+
+echo ""
+
+# Test --skip-experimental flag
+echo "Testing --skip-experimental flag..."
+cd "$(dirname "$0")/.."
+# Run with --skip-experimental to verify it doesn't fail
+./install.sh --config /tmp/test-config-skip --skip-experimental > /tmp/skip-test.log 2>&1 <<EOF
+n
+EOF
+
+# Check that warning was shown
+if grep -q "WARNING: Skipping BlueZ experimental mode" /tmp/skip-test.log; then
+    echo "  ✓ --skip-experimental flag works (warning displayed)"
+else
+    echo "  ⚠ WARNING: --skip-experimental flag may not be working correctly"
+fi
 
 echo ""
 echo "=== SUCCESS: All tests passed ==="

@@ -51,19 +51,26 @@ pip_install() {
 
 # Parse command line arguments
 CUSTOM_CONFIG_DIR=""
+SKIP_BLUEZ_EXPERIMENTAL=false
 while [[ $# -gt 0 ]]; do
     case $1 in
         --config)
             CUSTOM_CONFIG_DIR="$2"
             shift 2
             ;;
+        --skip-experimental)
+            SKIP_BLUEZ_EXPERIMENTAL=true
+            shift
+            ;;
         -h|--help)
-            echo "Usage: $0 [--config CONFIG_DIR]"
+            echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --config CONFIG_DIR    Install to custom Reticulum config directory"
-            echo "                         (default: ~/.reticulum)"
-            echo "  -h, --help            Show this help message"
+            echo "  --config CONFIG_DIR       Install to custom Reticulum config directory"
+            echo "                            (default: ~/.reticulum)"
+            echo "  --skip-experimental       Skip enabling BlueZ experimental mode"
+            echo "                            WARNING: May cause BLE connection failures"
+            echo "  -h, --help               Show this help message"
             exit 0
             ;;
         *)
@@ -350,6 +357,139 @@ else
 fi
 
 echo
+
+# Step 5A: BlueZ Experimental Mode
+print_header "BlueZ Experimental Mode"
+
+# Check if bluetoothctl is available
+if ! command -v bluetoothctl &> /dev/null; then
+    print_warning "bluetoothctl not found - BlueZ may not be installed"
+    print_info "BLE interface requires BlueZ for Bluetooth functionality"
+    echo
+elif ! command -v systemctl &> /dev/null; then
+    print_warning "systemctl not found - cannot configure BlueZ experimental mode"
+    print_info "This system may not use systemd, or this may be a container environment"
+    echo
+else
+    # Detect BlueZ version
+    BLUEZ_VERSION=$(bluetoothctl --version 2>/dev/null | grep -oP '\d+\.\d+' | head -1)
+
+    if [ -z "$BLUEZ_VERSION" ]; then
+        print_warning "Could not detect BlueZ version"
+        echo
+    else
+        print_info "Detected BlueZ version: $BLUEZ_VERSION"
+
+        # Parse version to check if >= 5.49
+        VERSION_MAJOR=$(echo "$BLUEZ_VERSION" | cut -d. -f1)
+        VERSION_MINOR=$(echo "$BLUEZ_VERSION" | cut -d. -f2)
+
+        if [ "$VERSION_MAJOR" -lt 5 ] || ([ "$VERSION_MAJOR" -eq 5 ] && [ "$VERSION_MINOR" -lt 49 ]); then
+            print_warning "BlueZ version $BLUEZ_VERSION does not support experimental mode (requires >= 5.49)"
+            print_info "BLE interface will work with standard connection methods"
+            print_info "Consider upgrading BlueZ for full BLE compatibility"
+            echo
+        else
+            # Check if experimental mode is already enabled
+            if systemctl status bluetooth 2>/dev/null | grep -q -- "-E\|--experimental"; then
+                print_success "BlueZ experimental mode already enabled"
+                echo
+            elif [ "$SKIP_BLUEZ_EXPERIMENTAL" = true ]; then
+                # User explicitly skipped experimental mode - show strong warning
+                echo
+                print_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                print_error "WARNING: Skipping BlueZ experimental mode"
+                print_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo
+                echo -e "${RED}BLE connections may fail with errors like:${NC}"
+                echo "  • br-connection-profile-unavailable"
+                echo "  • ProfileUnavailable"
+                echo "  • Immediate disconnections after pairing"
+                echo
+                echo -e "${RED}Your BLE interface may attempt Classic Bluetooth (BR/EDR)${NC}"
+                echo -e "${RED}connections instead of BLE (LE) connections.${NC}"
+                echo
+                echo -e "${YELLOW}This is NOT RECOMMENDED unless you have a specific reason.${NC}"
+                echo
+                echo "To enable experimental mode later:"
+                echo "  1. sudo systemctl edit bluetooth"
+                echo "  2. Add these lines:"
+                echo "       [Service]"
+                echo "       ExecStart="
+                echo "       ExecStart=/usr/lib/bluetooth/bluetoothd -E"
+                echo "  3. sudo systemctl daemon-reload"
+                echo "  4. sudo systemctl restart bluetooth"
+                echo
+                print_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo
+            else
+                # Enable experimental mode by default
+                print_info "Enabling BlueZ experimental mode (required for proper BLE connectivity)"
+                print_info "This enables LE-specific connection methods (ConnectDevice API)"
+                echo
+
+                # Find bluetoothd path
+                BLUETOOTHD_PATH=""
+                for path in /usr/lib/bluetooth/bluetoothd /usr/libexec/bluetooth/bluetoothd; do
+                    if [ -f "$path" ]; then
+                        BLUETOOTHD_PATH="$path"
+                        break
+                    fi
+                done
+
+                if [ -z "$BLUETOOTHD_PATH" ]; then
+                    print_error "Could not find bluetoothd binary"
+                    print_warning "Tried: /usr/lib/bluetooth/bluetoothd, /usr/libexec/bluetooth/bluetoothd"
+                    echo
+                else
+                    print_info "Using bluetoothd at: $BLUETOOTHD_PATH"
+
+                    # Create systemd override
+                    print_info "Creating systemd override for bluetooth service..."
+
+                    # Use sudo only if not running as root
+                    if [ "$EUID" -eq 0 ]; then
+                        # Running as root - no sudo needed
+                        mkdir -p /etc/systemd/system/bluetooth.service.d
+                        cat > /etc/systemd/system/bluetooth.service.d/override.conf <<EOF
+[Service]
+ExecStart=
+ExecStart=$BLUETOOTHD_PATH -E
+EOF
+                        systemctl daemon-reload
+                        systemctl restart bluetooth
+                    else
+                        # Not root - use sudo
+                        sudo mkdir -p /etc/systemd/system/bluetooth.service.d
+                        sudo tee /etc/systemd/system/bluetooth.service.d/override.conf > /dev/null <<EOF
+[Service]
+ExecStart=
+ExecStart=$BLUETOOTHD_PATH -E
+EOF
+                        sudo systemctl daemon-reload
+                        sudo systemctl restart bluetooth
+                    fi
+
+                    # Verify bluetooth service is running
+                    if systemctl is-active --quiet bluetooth; then
+                        # Double-check that -E flag is actually set
+                        if ps aux | grep bluetoothd | grep -q -- "-E"; then
+                            print_success "BlueZ experimental mode enabled successfully"
+                        else
+                            print_warning "Bluetooth service restarted but -E flag not detected"
+                            print_info "You may need to manually verify: ps aux | grep bluetoothd"
+                        fi
+                    else
+                        print_error "Bluetooth service failed to start"
+                        print_warning "Check status with: sudo systemctl status bluetooth"
+                        echo
+                    fi
+                    echo
+                fi
+            fi
+        fi
+    fi
+fi
 
 # Step 6: Configuration
 print_header "Configuration"

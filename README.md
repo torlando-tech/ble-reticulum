@@ -43,7 +43,15 @@ The script will:
 2. ✓ Install system dependencies (BlueZ, dbus)
 3. ✓ Install Python packages in the correct environment
 4. ✓ Copy BLE interface files to `~/.reticulum/interfaces/` (or custom config directory if specified)
-5. ✓ Optionally set up Bluetooth permissions
+5. ✓ Enable BlueZ experimental mode (required for proper BLE connectivity)
+6. ✓ Optionally set up Bluetooth permissions
+
+**BlueZ Experimental Mode**: The installer automatically enables BlueZ experimental mode, which is required for proper BLE connectivity. This allows the BLE interface to use LE-specific connection methods instead of defaulting to Classic Bluetooth (BR/EDR), preventing connection errors like "br-connection-profile-unavailable".
+
+To skip this configuration (not recommended):
+```bash
+./install.sh --skip-experimental
+```
 
 ### Option B: Manual Installation
 
@@ -100,7 +108,35 @@ mkdir -p ~/.reticulum/interfaces
 cp src/RNS/Interfaces/BLE*.py ~/.reticulum/interfaces/
 ```
 
-#### 4. Grant Bluetooth Permissions
+#### 4. Enable BlueZ Experimental Mode (Required)
+
+BlueZ experimental mode is required for proper BLE connectivity. Without it, BlueZ may attempt Classic Bluetooth (BR/EDR) connections instead of BLE (LE) connections, causing connection failures.
+
+Enable experimental mode (BlueZ >= 5.49):
+```bash
+sudo systemctl edit bluetooth
+```
+
+Add these lines:
+```
+[Service]
+ExecStart=
+ExecStart=/usr/lib/bluetooth/bluetoothd -E
+```
+
+Save and restart Bluetooth:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart bluetooth
+```
+
+Verify it's enabled:
+```bash
+ps aux | grep bluetoothd
+# Should show: /usr/lib/bluetooth/bluetoothd -E
+```
+
+#### 5. Grant Bluetooth Permissions
 
 For non-root operation:
 ```bash
@@ -199,8 +235,20 @@ python ble_minimal_test.py test
 - Set `enable_peripheral = no` to disable peripheral mode
 
 ### Permission denied errors
-- Grant capabilities to Python (see Installation → Manual Installation → step 4)
+- Grant capabilities to Python (see Installation → Manual Installation → step 5)
 - Or run with sudo: `sudo rnsd` (not recommended)
+
+### BR/EDR connection errors (br-connection-profile-unavailable, ProfileUnavailable)
+These errors occur when BlueZ attempts Classic Bluetooth (BR/EDR) connections instead of BLE (LE) connections. This is the most common BLE connection issue.
+
+**Symptoms:**
+- Devices connect then immediately disconnect
+- Errors: "br-connection-profile-unavailable", "ProfileUnavailable"
+- "ConnectDevice() unavailable" in logs
+- Devices get blacklisted after multiple failures
+
+**Solution:**
+Enable BlueZ experimental mode (see Installation → Manual Installation → step 4). If you used the automated installer, re-run it without `--skip-experimental`.
 
 ## Architecture
 
