@@ -455,7 +455,12 @@ else
         # Grant capabilities if we have a valid path
         if [ -f "$PYTHON_PATH" ] && [ ! -L "$PYTHON_PATH" ]; then
             print_info "Granting capabilities to: $PYTHON_PATH"
-            sudo setcap 'cap_net_raw,cap_net_admin+eip' "$PYTHON_PATH"
+            # Use sudo only if not running as root (Docker containers run as root without sudo)
+            if [ "$EUID" -eq 0 ]; then
+                setcap 'cap_net_raw,cap_net_admin+eip' "$PYTHON_PATH"
+            else
+                sudo setcap 'cap_net_raw,cap_net_admin+eip' "$PYTHON_PATH"
+            fi
 
             if [ $? -eq 0 ]; then
                 print_success "Bluetooth permissions granted successfully"
@@ -629,7 +634,12 @@ if command -v bluetoothctl &> /dev/null; then
         if rfkill list bluetooth | grep -q "Soft blocked: yes"; then
             print_warning "Bluetooth adapter is soft-blocked by rfkill"
             print_info "Unblocking Bluetooth adapter..."
-            sudo rfkill unblock bluetooth
+            # Use sudo only if not running as root (Docker containers run as root without sudo)
+            if [ "$EUID" -eq 0 ]; then
+                rfkill unblock bluetooth
+            else
+                sudo rfkill unblock bluetooth
+            fi
             sleep 1
 
             # Verify unblock succeeded
