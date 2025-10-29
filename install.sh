@@ -158,7 +158,67 @@ fi
 
 echo
 
-# Step 1: Check for Reticulum installation
+# Step 1: Install system dependencies
+print_header "Installing System Dependencies"
+
+if command -v apt-get &> /dev/null; then
+    # Debian/Ubuntu/Raspberry Pi OS
+    print_info "Detected Debian/Ubuntu-based system"
+
+    # Detect architecture for platform-specific dependencies
+    ARCH=$(dpkg --print-architecture 2>/dev/null || echo "unknown")
+    print_info "Detected architecture: $ARCH"
+
+    PACKAGES="python3-pip python3-gi python3-dbus python3-cairo bluez libcap2-bin"
+
+    # Add libffi-dev only for 32-bit ARM (armhf) - needed for cffi compilation
+    # x86_64 and arm64 have pre-built cffi wheels available
+    if [[ "$ARCH" == "armhf" ]]; then
+        PACKAGES="$PACKAGES libffi-dev"
+        print_info "32-bit ARM detected - adding libffi-dev for cffi compilation"
+    fi
+
+    echo "Installing: $PACKAGES"
+
+    # Use sudo only if not running as root
+    if [ "$EUID" -eq 0 ]; then
+        apt-get update
+        apt-get install -y $PACKAGES
+    else
+        sudo apt-get update
+        sudo apt-get install -y $PACKAGES
+    fi
+    print_success "System dependencies installed (using pre-compiled system packages)"
+elif command -v pacman &> /dev/null; then
+    # Arch Linux
+    print_info "Detected Arch Linux"
+    echo "Installing: base-devel gobject-introspection python-pip python-dbus python-cairo bluez bluez-utils libcap"
+    print_warning "Note: PyGObject will be compiled from pip due to version requirements (bluezero needs <3.52.0, Arch has 3.54.5)"
+    # Use sudo only if not running as root
+    if [ "$EUID" -eq 0 ]; then
+        # Sync package database first (may have been synced in basic prereqs, but ensure it's current)
+        pacman -Sy --noconfirm
+        # Skip python-gobject to avoid version conflict - pip will compile PyGObject
+        # gobject-introspection provides dev files needed for PyGObject compilation
+        pacman -S --needed --noconfirm base-devel gobject-introspection python-pip python-dbus python-cairo bluez bluez-utils libcap
+    else
+        sudo pacman -Sy --noconfirm
+        sudo pacman -S --needed --noconfirm base-devel gobject-introspection python-pip python-dbus python-cairo bluez bluez-utils libcap
+    fi
+    print_success "System dependencies installed (PyGObject will be compiled from pip)"
+else
+    print_warning "Could not detect package manager"
+    print_info "Please manually install: BlueZ 5.x, python3-dbus"
+    read -p "Continue anyway? (y/N) " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        exit 1
+    fi
+fi
+
+echo
+
+# Step 2: Check for Reticulum installation
 print_header "Checking for Reticulum"
 
 RNS_VENV=""
@@ -254,51 +314,6 @@ else
         echo "  pip install rns"
         echo "  # Then add to PATH: export PATH=\"\$HOME/.local/bin:\$PATH\""
         echo "Or visit: https://reticulum.network"
-        exit 1
-    fi
-fi
-
-echo
-
-# Step 2: Install system dependencies
-print_header "Installing System Dependencies"
-
-if command -v apt-get &> /dev/null; then
-    # Debian/Ubuntu/Raspberry Pi OS
-    print_info "Detected Debian/Ubuntu-based system"
-    echo "Installing: python3-pip python3-gi python3-dbus python3-cairo bluez libcap2-bin"
-    # Use sudo only if not running as root
-    if [ "$EUID" -eq 0 ]; then
-        apt-get update
-        apt-get install -y python3-pip python3-gi python3-dbus python3-cairo bluez libcap2-bin
-    else
-        sudo apt-get update
-        sudo apt-get install -y python3-pip python3-gi python3-dbus python3-cairo bluez libcap2-bin
-    fi
-    print_success "System dependencies installed (using pre-compiled system packages)"
-elif command -v pacman &> /dev/null; then
-    # Arch Linux
-    print_info "Detected Arch Linux"
-    echo "Installing: base-devel gobject-introspection python-pip python-dbus python-cairo bluez bluez-utils libcap"
-    print_warning "Note: PyGObject will be compiled from pip due to version requirements (bluezero needs <3.52.0, Arch has 3.54.5)"
-    # Use sudo only if not running as root
-    if [ "$EUID" -eq 0 ]; then
-        # Sync package database first (may have been synced in basic prereqs, but ensure it's current)
-        pacman -Sy --noconfirm
-        # Skip python-gobject to avoid version conflict - pip will compile PyGObject
-        # gobject-introspection provides dev files needed for PyGObject compilation
-        pacman -S --needed --noconfirm base-devel gobject-introspection python-pip python-dbus python-cairo bluez bluez-utils libcap
-    else
-        sudo pacman -Sy --noconfirm
-        sudo pacman -S --needed --noconfirm base-devel gobject-introspection python-pip python-dbus python-cairo bluez bluez-utils libcap
-    fi
-    print_success "System dependencies installed (PyGObject will be compiled from pip)"
-else
-    print_warning "Could not detect package manager"
-    print_info "Please manually install: BlueZ 5.x, python3-dbus"
-    read -p "Continue anyway? (y/N) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         exit 1
     fi
 fi
