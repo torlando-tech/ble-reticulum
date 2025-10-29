@@ -224,6 +224,23 @@ else
         RNS_PYTHON="python3"
         # Ensure it's executable
         chmod +x "$HOME/.local/bin/rnsd" 2>/dev/null || true
+
+        # Automatically add ~/.local/bin to PATH if not already there
+        if [ -f "$HOME/.bashrc" ]; then
+            if ! grep -q '.local/bin' "$HOME/.bashrc" 2>/dev/null; then
+                print_info "Adding ~/.local/bin to PATH in ~/.bashrc..."
+                echo '' >> "$HOME/.bashrc"
+                echo '# Added by Reticulum BLE installer' >> "$HOME/.bashrc"
+                echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
+                print_success "Added ~/.local/bin to PATH in ~/.bashrc"
+                print_warning "Reload your shell to use rnsd command:"
+                echo "  source ~/.bashrc"
+                echo "  # Or open a new terminal"
+                echo
+            else
+                print_info "~/.local/bin already in PATH configuration"
+            fi
+        fi
     elif python3 -c "import RNS" 2>/dev/null; then
         print_warning "Reticulum Python package installed, but rnsd command not found in PATH"
         print_info "You may need to add ~/.local/bin to your PATH"
@@ -625,14 +642,17 @@ echo
 echo "2. See examples/config_example.toml for all configuration options"
 echo
 
-# Add PATH note if rnsd is in user's local bin
+# Add PATH note only if rnsd is in user's local bin AND not added to .bashrc
 STEP_NUM=3
-if [ -f "$HOME/.local/bin/rnsd" ] && [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
-    echo "3. Add ~/.local/bin to your PATH (for rnsd command):"
-    echo "   echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc"
-    echo "   source ~/.bashrc"
-    echo
-    STEP_NUM=4
+if [ -f "$HOME/.local/bin/rnsd" ] && [ -f "$HOME/.bashrc" ]; then
+    # Only show if we didn't automatically add it (i.e., it wasn't already there)
+    if ! grep -q '.local/bin' "$HOME/.bashrc" 2>/dev/null; then
+        echo "3. Add ~/.local/bin to your PATH (for rnsd command):"
+        echo "   echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc"
+        echo "   source ~/.bashrc"
+        echo
+        STEP_NUM=4
+    fi
 fi
 
 echo "$STEP_NUM. Start Reticulum:"
