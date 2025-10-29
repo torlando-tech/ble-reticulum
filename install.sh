@@ -587,8 +587,9 @@ else
 ExecStart=
 ExecStart=$BLUETOOTHD_PATH -E
 EOF
-                        systemctl daemon-reload
-                        systemctl restart bluetooth
+                        # Non-fatal in container/CI environments where systemd isn't running
+                        systemctl daemon-reload 2>/dev/null || true
+                        systemctl restart bluetooth 2>/dev/null || true
                     else
                         # Not root - use sudo
                         sudo mkdir -p /etc/systemd/system/bluetooth.service.d
@@ -597,12 +598,13 @@ EOF
 ExecStart=
 ExecStart=$BLUETOOTHD_PATH -E
 EOF
-                        sudo systemctl daemon-reload
-                        sudo systemctl restart bluetooth
+                        # Non-fatal in container/CI environments where systemd isn't running
+                        sudo systemctl daemon-reload 2>/dev/null || true
+                        sudo systemctl restart bluetooth 2>/dev/null || true
                     fi
 
-                    # Verify bluetooth service is running
-                    if systemctl is-active --quiet bluetooth; then
+                    # Verify bluetooth service is running (skip in container environments)
+                    if systemctl is-active --quiet bluetooth 2>/dev/null; then
                         # Double-check that -E flag is actually set
                         if ps aux | grep bluetoothd | grep -q -- "-E"; then
                             print_success "BlueZ experimental mode enabled successfully"
@@ -610,10 +612,14 @@ EOF
                             print_warning "Bluetooth service restarted but -E flag not detected"
                             print_info "You may need to manually verify: ps aux | grep bluetoothd"
                         fi
-                    else
+                    elif command -v systemctl &> /dev/null && [ ! -f /.dockerenv ]; then
+                        # Only show error if systemctl exists and we're not in a container
                         print_error "Bluetooth service failed to start"
                         print_warning "Check status with: sudo systemctl status bluetooth"
                         echo
+                    else
+                        # Container environment or systemd not available
+                        print_info "Systemd override created (service restart skipped in container environment)"
                     fi
                     echo
                 fi
