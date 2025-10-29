@@ -862,9 +862,23 @@ class BLEInterface(Interface):
             RNS.log(f"{self} scanning for peers (scan_time={scan_time:.1f}s)...", RNS.LOG_EXTREME)
 
             scanner = BleakScanner(detection_callback=detection_callback)
-            await scanner.start()
-            await asyncio.sleep(scan_time)
-            await scanner.stop()
+            try:
+                await scanner.start()
+                await asyncio.sleep(scan_time)
+                await scanner.stop()
+            except Exception as e:
+                error_msg = str(e)
+                # Check for "Not Powered" or similar adapter power issues
+                if "No powered Bluetooth adapters" in error_msg or "Not Powered" in error_msg:
+                    RNS.log(f"{self} Bluetooth adapter is not powered!", RNS.LOG_ERROR)
+                    RNS.log(f"{self} Solution: Run 'bluetoothctl power on' or 'sudo rfkill unblock bluetooth'", RNS.LOG_ERROR)
+                    RNS.log(f"{self} See troubleshooting: https://github.com/torlando-tech/ble-reticulum#bluetooth-adapter-not-powered", RNS.LOG_ERROR)
+                    # Don't raise, just return - the discovery loop will retry
+                    self.scanning = False
+                    return
+                else:
+                    # Re-raise other errors
+                    raise
 
             # Get local adapter address if we don't have it yet (for connection direction preference)
             if self.local_address is None:

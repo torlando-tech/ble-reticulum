@@ -618,6 +618,45 @@ EOF
     fi
 fi
 
+# Step 5B: Bluetooth Adapter Power State
+print_header "Bluetooth Adapter Power State"
+
+if command -v bluetoothctl &> /dev/null; then
+    print_info "Checking Bluetooth adapter power state..."
+
+    # Check if adapter is powered
+    if bluetoothctl show | grep -q "Powered: yes"; then
+        print_success "Bluetooth adapter is powered on"
+    else
+        print_warning "Bluetooth adapter is not powered"
+        print_info "Powering on Bluetooth adapter..."
+
+        # Power on the adapter
+        echo -e "power on\nquit" | bluetoothctl > /dev/null 2>&1
+
+        # Verify it worked
+        sleep 1
+        if bluetoothctl show | grep -q "Powered: yes"; then
+            print_success "Bluetooth adapter powered on successfully"
+        else
+            print_error "Failed to power on Bluetooth adapter"
+            echo
+            print_info "Troubleshooting steps:"
+            echo "  1. Check if adapter is blocked: sudo rfkill list bluetooth"
+            echo "  2. Unblock if needed: sudo rfkill unblock bluetooth"
+            echo "  3. Try manually: bluetoothctl power on"
+            echo "  4. Verify adapter exists: bluetoothctl list"
+            echo
+            print_warning "BLE interface may not work until adapter is powered on"
+        fi
+    fi
+else
+    print_warning "bluetoothctl not available, cannot check adapter power state"
+    print_info "Ensure Bluetooth adapter is powered on before running rnsd"
+fi
+
+echo
+
 # Step 6: Configuration
 print_header "Configuration"
 
