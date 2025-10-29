@@ -3,13 +3,57 @@ name: Tests
 on:
   push:
     branches: [ "*" ]
+    paths:
+      - 'install.sh'
+      - 'src/**'
+      - 'tests/**'
+      - '.github/workflows/**'
+      - '*.txt'      # requirements files
+      - '*.toml'     # pyproject.toml
+      - '*.cfg'      # setup.cfg
+      - '*.py'       # any Python file in root
   pull_request:
     branches: [ "*" ]
+    paths:
+      - 'install.sh'
+      - 'src/**'
+      - 'tests/**'
+      - '.github/workflows/**'
+      - '*.txt'      # requirements files
+      - '*.toml'     # pyproject.toml
+      - '*.cfg'      # setup.cfg
+      - '*.py'       # any Python file in root
 
 jobs:
+  # Detect which files changed to run only relevant tests
+  detect-changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      python: ${{ steps.filter.outputs.python }}
+      installer: ${{ steps.filter.outputs.installer }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v2
+        id: filter
+        with:
+          filters: |
+            python:
+              - 'src/**/*.py'
+              - 'tests/test_*.py'
+              - '*.txt'
+              - '*.toml'
+              - '*.cfg'
+            installer:
+              - 'install.sh'
+              - 'tests/test_installer.sh'
+              - '.github/workflows/test.yml'
+
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.python == 'true'
 
     strategy:
       matrix:
