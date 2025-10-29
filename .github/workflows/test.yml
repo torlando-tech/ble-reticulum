@@ -218,7 +218,12 @@ jobs:
         echo "**Platform:** ${{ matrix.platform }}" >> $GITHUB_STEP_SUMMARY
         echo "**Base Image:** ${{ matrix.os-image }}" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "✓ System packages: python3-gi, python3-dbus, python3-cairo, bluez" >> $GITHUB_STEP_SUMMARY
+        if [[ "${{ matrix.platform }}" == "linux/arm/v7" ]]; then
+          echo "✓ System packages: python3-gi, python3-dbus, python3-cairo, bluez, libffi-dev" >> $GITHUB_STEP_SUMMARY
+          echo "✓ libffi-dev included for 32-bit ARM cffi compilation" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "✓ System packages: python3-gi, python3-dbus, python3-cairo, bluez" >> $GITHUB_STEP_SUMMARY
+        fi
         echo "✓ Pip packages: bleak==1.1.1, bluezero" >> $GITHUB_STEP_SUMMARY
         echo "✓ BLE interface files copied" >> $GITHUB_STEP_SUMMARY
         echo "✓ BlueZ experimental mode configured" >> $GITHUB_STEP_SUMMARY

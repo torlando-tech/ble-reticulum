@@ -266,14 +266,28 @@ print_header "Installing System Dependencies"
 if command -v apt-get &> /dev/null; then
     # Debian/Ubuntu/Raspberry Pi OS
     print_info "Detected Debian/Ubuntu-based system"
-    echo "Installing: python3-pip python3-gi python3-dbus python3-cairo bluez libcap2-bin libffi-dev"
+
+    # Detect architecture for platform-specific dependencies
+    ARCH=$(dpkg --print-architecture 2>/dev/null || echo "unknown")
+    PACKAGES="python3-pip python3-gi python3-dbus python3-cairo bluez libcap2-bin"
+
+    # Add libffi-dev only for 32-bit ARM (armhf) - needed for cffi compilation
+    # x86_64 and arm64 have pre-built cffi wheels available
+    if [[ "$ARCH" == "armhf" ]]; then
+        PACKAGES="$PACKAGES libffi-dev"
+        echo "Installing: $PACKAGES"
+        print_info "Note: Including libffi-dev for 32-bit ARM cffi compilation"
+    else
+        echo "Installing: $PACKAGES"
+    fi
+
     # Use sudo only if not running as root
     if [ "$EUID" -eq 0 ]; then
         apt-get update
-        apt-get install -y python3-pip python3-gi python3-dbus python3-cairo bluez libcap2-bin libffi-dev
+        apt-get install -y $PACKAGES
     else
         sudo apt-get update
-        sudo apt-get install -y python3-pip python3-gi python3-dbus python3-cairo bluez libcap2-bin libffi-dev
+        sudo apt-get install -y $PACKAGES
     fi
     print_success "System dependencies installed (using pre-compiled system packages)"
 elif command -v pacman &> /dev/null; then
