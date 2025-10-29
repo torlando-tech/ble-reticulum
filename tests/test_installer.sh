@@ -37,7 +37,8 @@ echo ""
 check_package() {
     local pkg="$1"
     if [ "$OS_TYPE" = "debian" ]; then
-        dpkg -l | grep -q "^ii  $pkg " || { echo "FAIL: $pkg not installed"; exit 1; }
+        # Match package with or without architecture suffix (e.g., python3-cairo:amd64)
+        dpkg -l | grep -q "^ii  $pkg" || { echo "FAIL: $pkg not installed"; exit 1; }
     elif [ "$OS_TYPE" = "arch" ]; then
         pacman -Q "$pkg" &> /dev/null || { echo "FAIL: $pkg not installed"; exit 1; }
     fi

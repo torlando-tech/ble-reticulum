@@ -129,8 +129,11 @@ elif command -v pacman &> /dev/null; then
         print_info "Installing basic prerequisites: ${MISSING_PACKAGES[*]}"
         # Use sudo only if not running as root
         if [ "$EUID" -eq 0 ]; then
+            # Sync package database first (required in fresh containers)
+            pacman -Sy --noconfirm
             pacman -S --noconfirm ${MISSING_PACKAGES[*]}
         else
+            sudo pacman -Sy --noconfirm
             sudo pacman -S --noconfirm ${MISSING_PACKAGES[*]}
         fi
         print_success "Basic prerequisites installed"
@@ -226,8 +229,11 @@ elif command -v pacman &> /dev/null; then
     echo "Installing: python-pip python-gobject python-dbus python-cairo bluez bluez-utils"
     # Use sudo only if not running as root
     if [ "$EUID" -eq 0 ]; then
+        # Sync package database first (may have been synced in basic prereqs, but ensure it's current)
+        pacman -Sy --noconfirm
         pacman -S --noconfirm python-pip python-gobject python-dbus python-cairo bluez bluez-utils
     else
+        sudo pacman -Sy --noconfirm
         sudo pacman -S --noconfirm python-pip python-gobject python-dbus python-cairo bluez bluez-utils
     fi
     print_success "System dependencies installed (using pre-compiled system packages)"
