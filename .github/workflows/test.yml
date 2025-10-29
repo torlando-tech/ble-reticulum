@@ -123,11 +123,16 @@ jobs:
     runs-on: ubuntu-latest
 
     strategy:
+      fail-fast: false
       matrix:
         os-image:
-          - "debian:12"      # Debian Bookworm (latest stable)
-          - "ubuntu:22.04"   # Ubuntu Jammy
+          - "debian:12"      # Debian Bookworm (current stable)
+          - "debian:trixie"  # Debian Trixie (testing - next release)
+          - "ubuntu:22.04"   # Ubuntu Jammy LTS
           - "ubuntu:24.04"   # Ubuntu Noble (latest LTS)
+
+    # Allow Trixie to fail without blocking CI (testing can be unstable)
+    continue-on-error: ${{ matrix.os-image == 'debian:trixie' }}
 
     container:
       image: ${{ matrix.os-image }}
