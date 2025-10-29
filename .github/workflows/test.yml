@@ -10,7 +10,6 @@ jobs:
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
-    if: false  # Temporarily disabled to save CI minutes while troubleshooting installer tests
 
     strategy:
       matrix:
@@ -62,7 +61,6 @@ jobs:
   integration-tests:
     name: Integration Tests
     runs-on: ubuntu-latest
-    if: false  # Temporarily disabled to save CI minutes while troubleshooting installer tests
 
     strategy:
       matrix:
