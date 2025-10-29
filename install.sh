@@ -427,7 +427,11 @@ else
         fi
     fi
 
-    if command -v setcap &> /dev/null; then
+    # Skip setcap when running as root (e.g., in containers) - root already has all permissions
+    if [ "$EUID" -eq 0 ]; then
+        print_info "Running as root - skipping capability grant (not needed)"
+        print_info "Root user already has all required Bluetooth permissions"
+    elif command -v setcap &> /dev/null; then
         # Get python3 path
         PYTHON_PATH=$(which python3)
         print_info "Detected Python at: $PYTHON_PATH"
@@ -583,8 +587,9 @@ else
 ExecStart=
 ExecStart=$BLUETOOTHD_PATH -E
 EOF
-                        systemctl daemon-reload
-                        systemctl restart bluetooth
+                        # Non-fatal in container/CI environments where systemd isn't running
+                        systemctl daemon-reload 2>/dev/null || true
+                        systemctl restart bluetooth 2>/dev/null || true
                     else
                         # Not root - use sudo
                         sudo mkdir -p /etc/systemd/system/bluetooth.service.d
@@ -593,12 +598,13 @@ EOF
 ExecStart=
 ExecStart=$BLUETOOTHD_PATH -E
 EOF
-                        sudo systemctl daemon-reload
-                        sudo systemctl restart bluetooth
+                        # Non-fatal in container/CI environments where systemd isn't running
+                        sudo systemctl daemon-reload 2>/dev/null || true
+                        sudo systemctl restart bluetooth 2>/dev/null || true
                     fi
 
-                    # Verify bluetooth service is running
-                    if systemctl is-active --quiet bluetooth; then
+                    # Verify bluetooth service is running (skip in container environments)
+                    if systemctl is-active --quiet bluetooth 2>/dev/null; then
                         # Double-check that -E flag is actually set
                         if ps aux | grep bluetoothd | grep -q -- "-E"; then
                             print_success "BlueZ experimental mode enabled successfully"
@@ -606,10 +612,14 @@ EOF
                             print_warning "Bluetooth service restarted but -E flag not detected"
                             print_info "You may need to manually verify: ps aux | grep bluetoothd"
                         fi
-                    else
+                    elif command -v systemctl &> /dev/null && [ ! -f /.dockerenv ]; then
+                        # Only show error if systemctl exists and we're not in a container
                         print_error "Bluetooth service failed to start"
                         print_warning "Check status with: sudo systemctl status bluetooth"
                         echo
+                    else
+                        # Container environment or systemd not available
+                        print_info "Systemd override created (service restart skipped in container environment)"
                     fi
                     echo
                 fi
@@ -617,6 +627,68 @@ EOF
         fi
     fi
 fi
+
+# Step 5B: Bluetooth Adapter Power State
+print_header "Bluetooth Adapter Power State"
+
+if command -v bluetoothctl &> /dev/null; then
+    print_info "Checking Bluetooth adapter power state..."
+
+    # Check for rfkill blocks first (must be unblocked before power-on works)
+    if command -v rfkill &> /dev/null; then
+        if rfkill list bluetooth | grep -q "Soft blocked: yes"; then
+            print_warning "Bluetooth adapter is soft-blocked by rfkill"
+            print_info "Unblocking Bluetooth adapter..."
+            # Use sudo only if not running as root (Docker containers run as root without sudo)
+            if [ "$EUID" -eq 0 ]; then
+                rfkill unblock bluetooth
+            else
+                sudo rfkill unblock bluetooth
+            fi
+            sleep 1
+
+            # Verify unblock succeeded
+            if rfkill list bluetooth | grep -q "Soft blocked: yes"; then
+                print_error "Failed to unblock Bluetooth adapter"
+                print_warning "You may need to check hardware switch or BIOS settings"
+            else
+                print_success "Bluetooth adapter unblocked successfully"
+            fi
+        fi
+    fi
+
+    # Check if adapter is powered
+    if bluetoothctl show 2>/dev/null | grep -q "Powered: yes"; then
+        print_success "Bluetooth adapter is powered on"
+    else
+        print_warning "Bluetooth adapter is not powered"
+        print_info "Powering on Bluetooth adapter..."
+
+        # Power on the adapter (non-fatal in container/CI environments where D-Bus may not be running)
+        echo -e "power on\nquit" | bluetoothctl > /dev/null 2>&1 || true
+
+        # Verify it worked
+        sleep 1
+        if bluetoothctl show 2>/dev/null | grep -q "Powered: yes"; then
+            print_success "Bluetooth adapter powered on successfully"
+        else
+            print_error "Failed to power on Bluetooth adapter"
+            echo
+            print_info "Troubleshooting steps:"
+            echo "  1. Check if adapter is blocked: sudo rfkill list bluetooth"
+            echo "  2. Unblock if needed: sudo rfkill unblock bluetooth"
+            echo "  3. Try manually: bluetoothctl power on"
+            echo "  4. Verify adapter exists: bluetoothctl list"
+            echo
+            print_warning "BLE interface may not work until adapter is powered on"
+        fi
+    fi
+else
+    print_warning "bluetoothctl not available, cannot check adapter power state"
+    print_info "Ensure Bluetooth adapter is powered on before running rnsd"
+fi
+
+echo
 
 # Step 6: Configuration
 print_header "Configuration"
@@ -630,13 +702,13 @@ echo "   File: $CONFIG_FILE"
 echo
 echo "   Add this section (copy-paste ready):"
 echo
-echo "   [[BLE Interface]]"
-echo "     type = BLEInterface"
-echo "     enabled = yes"
+echo "  [[BLE Interface]]"
+echo "    type = BLEInterface"
+echo "    enabled = yes"
 echo
-echo "     # Enable both modes for mesh"
-echo "     enable_peripheral = yes"
-echo "     enable_central = yes"
+echo "    # Enable both modes for mesh"
+echo "    enable_peripheral = yes"
+echo "    enable_central = yes"
 echo
 echo "2. See examples/config_example.toml for all configuration options"
 echo
