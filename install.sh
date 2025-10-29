@@ -1,6 +1,7 @@
 #!/bin/bash
 # Reticulum BLE Interface Installation Script
-# This script installs the BLE interface to an existing Reticulum installation
+# This script installs the BLE interface and all its prerequisites
+# Handles: basic system packages, Reticulum Network Stack, system dependencies, and BLE interface
 
 set -e  # Exit on error
 
@@ -32,6 +33,20 @@ print_warning() {
 
 print_info() {
     echo -e "${BLUE}ℹ${NC} $1"
+}
+
+# Helper function: pip install with compatibility across all OS versions
+pip_install() {
+    local packages="$*"
+
+    # Check if pip supports --break-system-packages flag (pip 23.0+, PEP 668)
+    if pip3 install --help 2>/dev/null | grep -q -- --break-system-packages; then
+        # Debian 12+, Trixie, Ubuntu 24.04+ with externally-managed-environment
+        pip3 install $packages --break-system-packages
+    else
+        # Ubuntu 22.04 and earlier (pip 22.x without the flag)
+        pip3 install $packages
+    fi
 }
 
 # Parse command line arguments
@@ -74,8 +89,49 @@ fi
 print_header "Reticulum BLE Interface Installer"
 echo
 
+# Step 0: Ensure basic prerequisites are installed
+print_header "Checking Basic Prerequisites"
+
+# Check if we have package manager access
+if command -v apt-get &> /dev/null; then
+    # Debian/Ubuntu - check for basic packages
+    MISSING_PACKAGES=()
+    for pkg in python3 python3-pip git; do
+        if ! dpkg -l | grep -q "^ii  $pkg "; then
+            MISSING_PACKAGES+=($pkg)
+        fi
+    done
+
+    if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
+        print_info "Installing basic prerequisites: ${MISSING_PACKAGES[*]}"
+        sudo apt-get update -qq
+        sudo apt-get install -y -q ${MISSING_PACKAGES[*]}
+        print_success "Basic prerequisites installed"
+    else
+        print_success "Basic prerequisites already installed"
+    fi
+elif command -v pacman &> /dev/null; then
+    # Arch Linux - check for basic packages
+    MISSING_PACKAGES=()
+    for pkg in python python-pip git; do
+        if ! pacman -Q $pkg &> /dev/null; then
+            MISSING_PACKAGES+=($pkg)
+        fi
+    done
+
+    if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
+        print_info "Installing basic prerequisites: ${MISSING_PACKAGES[*]}"
+        sudo pacman -S --noconfirm ${MISSING_PACKAGES[*]}
+        print_success "Basic prerequisites installed"
+    else
+        print_success "Basic prerequisites already installed"
+    fi
+fi
+
+echo
+
 # Step 1: Check for Reticulum installation
-print_info "Checking for Reticulum installation..."
+print_header "Checking for Reticulum"
 
 RNS_VENV=""
 RNS_PYTHON=""
@@ -114,12 +170,25 @@ if command -v rnsd &> /dev/null; then
         fi
     fi
 else
-    print_error "Reticulum (rnsd) not found!"
-    echo
-    echo "Please install Reticulum first:"
-    echo "  pip install rns"
-    echo "Or visit: https://reticulum.network"
-    exit 1
+    print_warning "Reticulum (rnsd) not found"
+    print_info "Installing Reticulum Network Stack..."
+
+    # Install Reticulum using our pip helper function
+    pip_install rns
+
+    # Verify installation
+    if command -v rnsd &> /dev/null; then
+        print_success "Reticulum installed successfully"
+        INSTALL_MODE="system"
+        RNS_PYTHON="python3"
+    else
+        print_error "Reticulum installation failed"
+        echo
+        echo "Please try installing manually:"
+        echo "  pip install rns"
+        echo "Or visit: https://reticulum.network"
+        exit 1
+    fi
 fi
 
 echo
@@ -171,7 +240,7 @@ if [ "$INSTALL_MODE" = "venv" ]; then
     # Install only packages not provided by system packages
     # System packages provide: PyGObject (gi), dbus-python (dbus), pycairo (cairo)
     # We need to install: bleak, bluezero
-    pip install bleak==1.1.1 bluezero
+    pip_install bleak==1.1.1 bluezero
     print_success "Python dependencies installed in virtual environment"
     print_info "Note: Using system-provided PyGObject, dbus-python, and pycairo"
 
@@ -179,14 +248,9 @@ elif [ "$INSTALL_MODE" = "system" ]; then
     print_info "Installing system-wide Python packages"
 
     # Install only packages not provided by system packages
-    # Try without sudo first
-    if pip install bleak==1.1.1 bluezero 2>/dev/null; then
-        print_success "Python dependencies installed (user)"
-    else
-        print_warning "User install failed, trying with sudo..."
-        sudo pip install bleak==1.1.1 bluezero
-        print_success "Python dependencies installed (system)"
-    fi
+    # Use pip_install helper for compatibility
+    pip_install bleak==1.1.1 bluezero
+    print_success "Python dependencies installed"
     print_info "Note: Using system-provided PyGObject, dbus-python, and pycairo"
 else
     print_error "Could not determine installation mode"

@@ -1,6 +1,7 @@
 #!/bin/bash
 # Integration test for install.sh on fresh Debian/Ubuntu systems
-# This script is meant to run in a fresh container to verify the installer works correctly
+# This script tests that install.sh works correctly on a completely fresh system
+# with no prerequisites installed
 
 set -e
 
@@ -15,23 +16,11 @@ ln -fs /usr/share/zoneinfo/UTC /etc/localtime
 echo "=== Testing install.sh on fresh system ==="
 echo "OS: $(cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2 | tr -d '"')"
 echo ""
-
-# Step 1: Install prerequisites (what a user would have)
-echo "Step 1: Installing base prerequisites..."
-apt-get update -qq
-apt-get install -y -q \
-    -o DPkg::Pre-Install-Pkgs::=/bin/true \
-    -o DPkg::Post-Install-Pkgs::=/bin/true \
-    sudo python3 python3-pip git
-
-# Install Reticulum (prerequisite for BLE interface)
-echo "Installing Reticulum..."
-pip3 install rns 2>&1 | grep -v "WARNING" || true
-
+echo "NOTE: install.sh will handle all prerequisites (Python, pip, Reticulum, etc.)"
 echo ""
 
-# Step 2: Run installer
-echo "Step 2: Running install.sh..."
+# Run installer - it now handles everything from basic packages to Reticulum
+echo "Running install.sh (self-contained installer)..."
 # Navigate to repository root (script is in tests/ directory)
 cd "$(dirname "$0")/.."
 chmod +x install.sh
@@ -44,8 +33,8 @@ EOF
 
 echo ""
 
-# Step 3: Verify installation
-echo "Step 3: Verifying installation..."
+# Verify installation
+echo "=== Verifying Installation ==="
 echo ""
 
 # Check system packages
@@ -69,6 +58,14 @@ echo "Checking Python module imports..."
 python3 -c "import gi; print('  ✓ gi version:', gi.__version__)" || { echo "FAIL: Cannot import gi"; exit 1; }
 python3 -c "import dbus; print('  ✓ dbus version:', dbus.__version__)" || { echo "FAIL: Cannot import dbus"; exit 1; }
 python3 -c "import cairo; print('  ✓ cairo imported successfully')" || { echo "FAIL: Cannot import cairo"; exit 1; }
+
+echo ""
+
+# Check Reticulum installation
+echo "Checking Reticulum installation..."
+command -v rnsd || { echo "FAIL: rnsd command not found"; exit 1; }
+echo "  ✓ rnsd command available"
+python3 -c "import RNS; print('  ✓ RNS version:', RNS.version)" || { echo "FAIL: Cannot import RNS"; exit 1; }
 
 echo ""
 
@@ -119,8 +116,10 @@ echo ""
 echo "=== SUCCESS: All tests passed ==="
 echo ""
 echo "Installation summary:"
-echo "  • System packages: python3-gi, python3-dbus, python3-cairo, bluez"
-echo "  • Pip packages: bleak, bluezero"
-echo "  • Install method: System packages (no compilation)"
-echo "  • Time: Fast (< 1 minute)"
+echo "  • install.sh is fully self-contained (handles all prerequisites)"
+echo "  • Reticulum Network Stack: installed via pip"
+echo "  • System packages: python3, python3-pip, git, python3-gi, python3-dbus, python3-cairo, bluez"
+echo "  • Pip packages: rns, bleak, bluezero"
+echo "  • Install method: System packages for compiled deps (no build tools needed)"
+echo "  • Installation time: Fast (< 2 minutes)"
 echo ""
