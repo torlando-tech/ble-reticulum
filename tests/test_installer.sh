@@ -205,7 +205,7 @@ echo "Installation summary:"
 echo "  • install.sh is fully self-contained (handles all prerequisites)"
 echo "  • Reticulum Network Stack: installed via pip"
 if [ "$OS_TYPE" = "debian" ]; then
-    echo "  • System packages: python3, python3-pip, git, python3-gi, python3-dbus, python3-cairo, bluez"
+    echo "  • System packages: python3, python3-pip, git, python3-gi, python3-dbus, python3-cairo, bluez, libffi-dev"
     echo "  • Pip packages: rns, bleak, bluezero"
     echo "  • Install method: System packages (no compilation)"
     echo "  • Installation time: < 1 minute"

@@ -266,14 +266,14 @@ print_header "Installing System Dependencies"
 if command -v apt-get &> /dev/null; then
     # Debian/Ubuntu/Raspberry Pi OS
     print_info "Detected Debian/Ubuntu-based system"
-    echo "Installing: python3-pip python3-gi python3-dbus python3-cairo bluez libcap2-bin"
+    echo "Installing: python3-pip python3-gi python3-dbus python3-cairo bluez libcap2-bin libffi-dev"
     # Use sudo only if not running as root
     if [ "$EUID" -eq 0 ]; then
         apt-get update
-        apt-get install -y python3-pip python3-gi python3-dbus python3-cairo bluez libcap2-bin
+        apt-get install -y python3-pip python3-gi python3-dbus python3-cairo bluez libcap2-bin libffi-dev
     else
         sudo apt-get update
-        sudo apt-get install -y python3-pip python3-gi python3-dbus python3-cairo bluez libcap2-bin
+        sudo apt-get install -y python3-pip python3-gi python3-dbus python3-cairo bluez libcap2-bin libffi-dev
     fi
     print_success "System dependencies installed (using pre-compiled system packages)"
 elif command -v pacman &> /dev/null; then
