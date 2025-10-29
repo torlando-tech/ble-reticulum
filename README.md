@@ -52,32 +52,45 @@ The script will:
 **Debian/Ubuntu/Raspberry Pi OS:**
 ```bash
 sudo apt-get update
-sudo apt-get install python3-pip python3-dbus bluez
+sudo apt-get install python3-pip python3-gi python3-dbus python3-cairo bluez
 ```
 
 **Arch Linux:**
 ```bash
-sudo pacman -S python-pip python-dbus bluez bluez-utils
+sudo pacman -S base-devel gobject-introspection python-pip python-dbus python-cairo bluez bluez-utils
 ```
+
+**Why these packages?**
+- `base-devel`: Build tools (gcc, make, meson) required for compiling PyGObject
+- `gobject-introspection`: Development files for GObject introspection (required for PyGObject compilation)
+- `python-dbus`: D-Bus Python bindings for BlueZ communication
+- `python-cairo`: Cairo graphics library
+- `bluez` / `bluez-utils`: Bluetooth stack and utilities for Linux
+
+**Note for Arch users:** PyGObject is intentionally NOT installed as a system package on Arch due to version incompatibility (Arch has 3.54.5, but bluezero requires <3.52.0). Instead, pip will compile the compatible PyGObject version (3.50.2) during installation. This adds ~2 minutes to installation time but ensures compatibility.
 
 #### 2. Install Python Dependencies
 
 **IMPORTANT:** Install in the same environment as Reticulum!
 
+Since we installed system packages for PyGObject, dbus-python, and pycairo in step 1, we only need to install the pure-Python packages:
+
 **If Reticulum is in a virtual environment:**
 ```bash
 # Activate the same venv where Reticulum is installed
 source /path/to/reticulum-venv/bin/activate
-pip install -r requirements.txt
+pip install bleak==1.1.1 bluezero
 ```
 
 **If Reticulum is installed system-wide:**
 ```bash
 # Install system-wide (may need sudo)
-pip install -r requirements.txt
+pip install bleak==1.1.1 bluezero
 # OR
-sudo pip install -r requirements.txt
+sudo pip install bleak==1.1.1 bluezero
 ```
+
+**Note:** The system packages (python3-gi, python3-dbus, python3-cairo) provide PyGObject, dbus-python, and pycairo, eliminating the need for lengthy compilation from source.
 
 #### 3. Copy BLE Interface Files
 

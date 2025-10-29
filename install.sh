@@ -1,6 +1,7 @@
 #!/bin/bash
 # Reticulum BLE Interface Installation Script
-# This script installs the BLE interface to an existing Reticulum installation
+# This script installs the BLE interface and all its prerequisites
+# Handles: basic system packages, Reticulum Network Stack, system dependencies, and BLE interface
 
 set -e  # Exit on error
 
@@ -34,6 +35,20 @@ print_info() {
     echo -e "${BLUE}ℹ${NC} $1"
 }
 
+# Helper function: pip install with compatibility across all OS versions
+pip_install() {
+    local packages="$*"
+
+    # Check if pip supports --break-system-packages flag (pip 23.0+, PEP 668)
+    if pip3 install --help 2>/dev/null | grep -q -- --break-system-packages; then
+        # Debian 12+, Trixie, Ubuntu 24.04+ with externally-managed-environment
+        pip3 install $packages --break-system-packages
+    else
+        # Ubuntu 22.04 and earlier (pip 22.x without the flag)
+        pip3 install $packages
+    fi
+}
+
 # Parse command line arguments
 CUSTOM_CONFIG_DIR=""
 while [[ $# -gt 0 ]]; do
@@ -65,11 +80,72 @@ if [[ "$OSTYPE" != "linux-gnu"* ]]; then
     exit 1
 fi
 
+# Detect CI environment and configure non-interactive mode
+if [[ -n "$CI" ]] || [[ -n "$GITHUB_ACTIONS" ]] || [[ -n "$DEBIAN_FRONTEND" ]]; then
+    export DEBIAN_FRONTEND=noninteractive
+    export DEBCONF_NONINTERACTIVE_SEEN=true
+fi
+
 print_header "Reticulum BLE Interface Installer"
 echo
 
+# Step 0: Ensure basic prerequisites are installed
+print_header "Checking Basic Prerequisites"
+
+# Check if we have package manager access
+if command -v apt-get &> /dev/null; then
+    # Debian/Ubuntu - check for basic packages
+    MISSING_PACKAGES=()
+    for pkg in python3 python3-pip git; do
+        if ! dpkg -l | grep -q "^ii  $pkg "; then
+            MISSING_PACKAGES+=($pkg)
+        fi
+    done
+
+    if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
+        print_info "Installing basic prerequisites: ${MISSING_PACKAGES[*]}"
+        # Use sudo only if not running as root (Debian containers run as root without sudo)
+        if [ "$EUID" -eq 0 ]; then
+            apt-get update -qq
+            apt-get install -y -q ${MISSING_PACKAGES[*]}
+        else
+            sudo apt-get update -qq
+            sudo apt-get install -y -q ${MISSING_PACKAGES[*]}
+        fi
+        print_success "Basic prerequisites installed"
+    else
+        print_success "Basic prerequisites already installed"
+    fi
+elif command -v pacman &> /dev/null; then
+    # Arch Linux - check for basic packages
+    MISSING_PACKAGES=()
+    for pkg in python python-pip git; do
+        if ! pacman -Q $pkg &> /dev/null; then
+            MISSING_PACKAGES+=($pkg)
+        fi
+    done
+
+    if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
+        print_info "Installing basic prerequisites: ${MISSING_PACKAGES[*]}"
+        # Use sudo only if not running as root
+        if [ "$EUID" -eq 0 ]; then
+            # Sync package database first (required in fresh containers)
+            pacman -Sy --noconfirm
+            pacman -S --noconfirm ${MISSING_PACKAGES[*]}
+        else
+            sudo pacman -Sy --noconfirm
+            sudo pacman -S --noconfirm ${MISSING_PACKAGES[*]}
+        fi
+        print_success "Basic prerequisites installed"
+    else
+        print_success "Basic prerequisites already installed"
+    fi
+fi
+
+echo
+
 # Step 1: Check for Reticulum installation
-print_info "Checking for Reticulum installation..."
+print_header "Checking for Reticulum"
 
 RNS_VENV=""
 RNS_PYTHON=""
@@ -108,12 +184,25 @@ if command -v rnsd &> /dev/null; then
         fi
     fi
 else
-    print_error "Reticulum (rnsd) not found!"
-    echo
-    echo "Please install Reticulum first:"
-    echo "  pip install rns"
-    echo "Or visit: https://reticulum.network"
-    exit 1
+    print_warning "Reticulum (rnsd) not found"
+    print_info "Installing Reticulum Network Stack..."
+
+    # Install Reticulum using our pip helper function
+    pip_install rns
+
+    # Verify installation
+    if command -v rnsd &> /dev/null; then
+        print_success "Reticulum installed successfully"
+        INSTALL_MODE="system"
+        RNS_PYTHON="python3"
+    else
+        print_error "Reticulum installation failed"
+        echo
+        echo "Please try installing manually:"
+        echo "  pip install rns"
+        echo "Or visit: https://reticulum.network"
+        exit 1
+    fi
 fi
 
 echo
@@ -124,16 +213,33 @@ print_header "Installing System Dependencies"
 if command -v apt-get &> /dev/null; then
     # Debian/Ubuntu/Raspberry Pi OS
     print_info "Detected Debian/Ubuntu-based system"
-    echo "Installing: python3-pip python3-dbus bluez"
-    sudo apt-get update
-    sudo apt-get install -y python3-pip python3-dbus bluez
-    print_success "System dependencies installed"
+    echo "Installing: python3-pip python3-gi python3-dbus python3-cairo bluez"
+    # Use sudo only if not running as root
+    if [ "$EUID" -eq 0 ]; then
+        apt-get update
+        apt-get install -y python3-pip python3-gi python3-dbus python3-cairo bluez
+    else
+        sudo apt-get update
+        sudo apt-get install -y python3-pip python3-gi python3-dbus python3-cairo bluez
+    fi
+    print_success "System dependencies installed (using pre-compiled system packages)"
 elif command -v pacman &> /dev/null; then
     # Arch Linux
     print_info "Detected Arch Linux"
-    echo "Installing: python-pip python-dbus bluez bluez-utils"
-    sudo pacman -S --noconfirm python-pip python-dbus bluez bluez-utils
-    print_success "System dependencies installed"
+    echo "Installing: base-devel gobject-introspection python-pip python-dbus python-cairo bluez bluez-utils"
+    print_warning "Note: PyGObject will be compiled from pip due to version requirements (bluezero needs <3.52.0, Arch has 3.54.5)"
+    # Use sudo only if not running as root
+    if [ "$EUID" -eq 0 ]; then
+        # Sync package database first (may have been synced in basic prereqs, but ensure it's current)
+        pacman -Sy --noconfirm
+        # Skip python-gobject to avoid version conflict - pip will compile PyGObject
+        # gobject-introspection provides dev files needed for PyGObject compilation
+        pacman -S --needed --noconfirm base-devel gobject-introspection python-pip python-dbus python-cairo bluez bluez-utils
+    else
+        sudo pacman -Sy --noconfirm
+        sudo pacman -S --needed --noconfirm base-devel gobject-introspection python-pip python-dbus python-cairo bluez bluez-utils
+    fi
+    print_success "System dependencies installed (PyGObject will be compiled from pip)"
 else
     print_warning "Could not detect package manager"
     print_info "Please manually install: BlueZ 5.x, python3-dbus"
@@ -149,6 +255,8 @@ echo
 # Step 3: Install Python dependencies
 print_header "Installing Python Dependencies"
 
+print_info "Installing pip packages (PyGObject, dbus-python, pycairo provided by system packages)"
+
 if [ "$INSTALL_MODE" = "venv" ]; then
     print_info "Installing to virtual environment: $RNS_VENV"
 
@@ -159,20 +267,22 @@ if [ "$INSTALL_MODE" = "venv" ]; then
 
     # Activate venv and install
     source "$RNS_VENV/bin/activate"
-    pip install -r requirements.txt
+
+    # Install only packages not provided by system packages
+    # System packages provide: PyGObject (gi), dbus-python (dbus), pycairo (cairo)
+    # We need to install: bleak, bluezero
+    pip_install bleak==1.1.1 bluezero
     print_success "Python dependencies installed in virtual environment"
+    print_info "Note: Using system-provided PyGObject, dbus-python, and pycairo"
 
 elif [ "$INSTALL_MODE" = "system" ]; then
     print_info "Installing system-wide Python packages"
 
-    # Try without sudo first
-    if pip install -r requirements.txt 2>/dev/null; then
-        print_success "Python dependencies installed (user)"
-    else
-        print_warning "User install failed, trying with sudo..."
-        sudo pip install -r requirements.txt
-        print_success "Python dependencies installed (system)"
-    fi
+    # Install only packages not provided by system packages
+    # Use pip_install helper for compatibility
+    pip_install bleak==1.1.1 bluezero
+    print_success "Python dependencies installed"
+    print_info "Note: Using system-provided PyGObject, dbus-python, and pycairo"
 else
     print_error "Could not determine installation mode"
     exit 1
