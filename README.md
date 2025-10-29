@@ -57,14 +57,17 @@ sudo apt-get install python3-pip python3-gi python3-dbus python3-cairo bluez
 
 **Arch Linux:**
 ```bash
-sudo pacman -S python-pip python-gobject python-dbus python-cairo bluez bluez-utils
+sudo pacman -S base-devel python-pip python-gobject python-dbus python-cairo bluez bluez-utils
 ```
 
 **Why these packages?**
-- `python3-gi` / `python-gobject`: Pre-compiled PyGObject bindings (avoids lengthy compilation)
-- `python3-dbus` / `python-dbus`: D-Bus Python bindings for BlueZ communication
-- `python3-cairo` / `python-cairo`: Cairo graphics library (PyGObject dependency)
-- `bluez`: Bluetooth stack for Linux
+- `base-devel`: Build tools (gcc, make, etc.) required for compiling PyGObject from pip
+- `python-gobject`: Python bindings for GObject (system package, but pip may still compile PyGObject)
+- `python-dbus`: D-Bus Python bindings for BlueZ communication
+- `python-cairo`: Cairo graphics library (PyGObject dependency)
+- `bluez` / `bluez-utils`: Bluetooth stack and utilities for Linux
+
+**Note for Arch users:** Unlike Debian/Ubuntu where all dependencies use pre-compiled system packages, Arch requires some compilation due to pip/system package integration differences. The bluezero pip package may compile PyGObject from source even when python-gobject is installed.
 
 #### 2. Install Python Dependencies
 

@@ -226,17 +226,18 @@ if command -v apt-get &> /dev/null; then
 elif command -v pacman &> /dev/null; then
     # Arch Linux
     print_info "Detected Arch Linux"
-    echo "Installing: python-pip python-gobject python-dbus python-cairo bluez bluez-utils"
+    echo "Installing: base-devel python-pip python-gobject python-dbus python-cairo bluez bluez-utils"
+    print_warning "Note: base-devel required for compiling bluezero dependencies (PyGObject from pip)"
     # Use sudo only if not running as root
     if [ "$EUID" -eq 0 ]; then
         # Sync package database first (may have been synced in basic prereqs, but ensure it's current)
         pacman -Sy --noconfirm
-        pacman -S --noconfirm python-pip python-gobject python-dbus python-cairo bluez bluez-utils
+        pacman -S --needed --noconfirm base-devel python-pip python-gobject python-dbus python-cairo bluez bluez-utils
     else
         sudo pacman -Sy --noconfirm
-        sudo pacman -S --noconfirm python-pip python-gobject python-dbus python-cairo bluez bluez-utils
+        sudo pacman -S --needed --noconfirm base-devel python-pip python-gobject python-dbus python-cairo bluez bluez-utils
     fi
-    print_success "System dependencies installed (using pre-compiled system packages)"
+    print_success "System dependencies installed (using pre-compiled system packages where available)"
 else
     print_warning "Could not detect package manager"
     print_info "Please manually install: BlueZ 5.x, python3-dbus"

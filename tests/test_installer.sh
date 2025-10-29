@@ -111,9 +111,9 @@ python3 -c "import bluezero; print('  ✓ bluezero imported successfully')" || {
 
 echo ""
 
-# Check that no build tools were required (verify we didn't compile anything)
-echo "Verifying no build dependencies were required..."
+# Check build tools status
 if [ "$OS_TYPE" = "debian" ]; then
+    echo "Verifying no build dependencies were required..."
     if dpkg -l | grep -q meson; then
         echo "  ⚠ WARNING: meson was installed (should not be needed)"
     fi
@@ -123,18 +123,12 @@ if [ "$OS_TYPE" = "debian" ]; then
     if dpkg -l | grep -q libglib2.0-dev; then
         echo "  ⚠ WARNING: libglib2.0-dev was installed (should not be needed)"
     fi
+    echo "  ✓ No build tools required"
 elif [ "$OS_TYPE" = "arch" ]; then
-    if pacman -Q meson &> /dev/null; then
-        echo "  ⚠ WARNING: meson was installed (should not be needed)"
-    fi
-    if pacman -Q cmake &> /dev/null; then
-        echo "  ⚠ WARNING: cmake was installed (should not be needed)"
-    fi
-    if pacman -Q glib2 &> /dev/null; then
-        echo "  ⚠ WARNING: glib2 dev headers were installed (should not be needed)"
-    fi
+    echo "Verifying build tools installed (required on Arch for PyGObject compilation)..."
+    check_package base-devel
+    echo "  ✓ base-devel installed (includes gcc, make, etc.)"
 fi
-echo "  ✓ No build tools required"
 
 echo ""
 
@@ -167,10 +161,12 @@ echo "  • install.sh is fully self-contained (handles all prerequisites)"
 echo "  • Reticulum Network Stack: installed via pip"
 if [ "$OS_TYPE" = "debian" ]; then
     echo "  • System packages: python3, python3-pip, git, python3-gi, python3-dbus, python3-cairo, bluez"
+    echo "  • Pip packages: rns, bleak, bluezero"
+    echo "  • Install method: System packages (no compilation)"
 elif [ "$OS_TYPE" = "arch" ]; then
-    echo "  • System packages: python, python-pip, git, python-gobject, python-dbus, python-cairo, bluez, bluez-utils"
+    echo "  • System packages: python, python-pip, git, python-gobject, python-dbus, python-cairo, bluez, bluez-utils, base-devel"
+    echo "  • Pip packages: rns, bleak, bluezero (PyGObject compiled during bluezero install)"
+    echo "  • Install method: System packages + compilation (base-devel provides build tools)"
 fi
-echo "  • Pip packages: rns, bleak, bluezero"
-echo "  • Install method: System packages for compiled deps (no build tools needed)"
-echo "  • Installation time: Fast (< 2 minutes)"
+echo "  • Installation time: Fast (< 2 minutes on Debian/Ubuntu, ~3 minutes on Arch)"
 echo ""
