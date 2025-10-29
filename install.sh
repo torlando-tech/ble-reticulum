@@ -427,7 +427,11 @@ else
         fi
     fi
 
-    if command -v setcap &> /dev/null; then
+    # Skip setcap when running as root (e.g., in containers) - root already has all permissions
+    if [ "$EUID" -eq 0 ]; then
+        print_info "Running as root - skipping capability grant (not needed)"
+        print_info "Root user already has all required Bluetooth permissions"
+    elif command -v setcap &> /dev/null; then
         # Get python3 path
         PYTHON_PATH=$(which python3)
         print_info "Detected Python at: $PYTHON_PATH"
@@ -455,12 +459,7 @@ else
         # Grant capabilities if we have a valid path
         if [ -f "$PYTHON_PATH" ] && [ ! -L "$PYTHON_PATH" ]; then
             print_info "Granting capabilities to: $PYTHON_PATH"
-            # Use sudo only if not running as root (Docker containers run as root without sudo)
-            if [ "$EUID" -eq 0 ]; then
-                setcap 'cap_net_raw,cap_net_admin+eip' "$PYTHON_PATH"
-            else
-                sudo setcap 'cap_net_raw,cap_net_admin+eip' "$PYTHON_PATH"
-            fi
+            sudo setcap 'cap_net_raw,cap_net_admin+eip' "$PYTHON_PATH"
 
             if [ $? -eq 0 ]; then
                 print_success "Bluetooth permissions granted successfully"
