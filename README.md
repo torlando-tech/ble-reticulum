@@ -209,9 +209,11 @@ ls ~/.local/pipx/venvs/
 sudo setcap 'cap_net_raw,cap_net_admin+eip' ~/.local/pipx/venvs/rns/bin/python3
 ```
 
-#### 5. Enable BlueZ Experimental Mode
+#### 5. Configure BlueZ
 
-The BLE interface requires BlueZ experimental features for proper BLE connectivity:
+The BLE interface requires BlueZ experimental features and automatic pairing configuration:
+
+**Enable Experimental Mode:**
 
 ```bash
 # Edit BlueZ service configuration
@@ -225,13 +227,28 @@ ExecStart=
 ExecStart=/usr/lib/bluetooth/bluetoothd --experimental
 ```
 
-Then reload and restart:
+**Enable JustWorksRepairing for Automatic Pairing:**
+
+Edit `/etc/bluetooth/main.conf` and add to the `[General]` section:
+
+```ini
+[General]
+JustWorksRepairing = always
+```
+
+This enables automatic pairing for peer-initiated connections, which is required for zero-touch mesh networking. Reticulum provides its own cryptographic security on top of the BLE transport.
+
+**Apply Changes:**
+
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl restart bluetooth.service
 
 # Verify experimental mode is enabled
 systemctl status bluetooth.service | grep -i experimental
+
+# Verify JustWorksRepairing is set
+grep JustWorksRepairing /etc/bluetooth/main.conf
 ```
 
 #### Why pipx Requires Special Handling
@@ -345,6 +362,37 @@ These errors occur when BlueZ attempts Classic Bluetooth (BR/EDR) connections in
 
 **Solution:**
 Enable BlueZ experimental mode (see Installation → Manual Installation → step 4). If you used the automated installer, re-run it without `--skip-experimental`.
+
+### BLE pairing failures / "JustWorksRepairing: never" warning
+The BLE interface logs a warning that BlueZ's JustWorksRepairing is set to "never", which may cause pairing failures in the mesh network.
+
+**Symptoms:**
+- Warning: `BlueZ JustWorksRepairing: never (default - may cause pairing failures)`
+- Recommendation message: `Set JustWorksRepairing=always in /etc/bluetooth/main.conf`
+- Intermittent connection failures with peer devices
+- Pairing requests rejected by BlueZ
+
+**Cause:**
+BlueZ's default `JustWorksRepairing` setting is "never", which blocks automatic pairing for peer-initiated connections. This breaks zero-touch mesh networking.
+
+**Solution:**
+Enable JustWorksRepairing in BlueZ configuration (see Installation → Manual Installation → step 5). If you used the automated installer, this is configured automatically. To verify or fix manually:
+
+```bash
+# Edit BlueZ configuration
+sudo nano /etc/bluetooth/main.conf
+
+# Add to [General] section:
+JustWorksRepairing = always
+
+# Restart Bluetooth service
+sudo systemctl restart bluetooth
+
+# Verify the setting
+grep JustWorksRepairing /etc/bluetooth/main.conf
+```
+
+**Note:** Just Works pairing provides unauthenticated BLE encryption. This is acceptable because Reticulum provides its own cryptographic security on top of the BLE transport layer.
 
 ### Bluetooth adapter not powered / "No powered Bluetooth adapters found"
 The Bluetooth adapter exists but is powered off, preventing BLE operations.
