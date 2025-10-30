@@ -39,9 +39,9 @@ chmod +x install.sh
 ```
 
 The script will:
-1. ✓ Detect if Reticulum is in a venv or system-wide
-2. ✓ Install system dependencies (BlueZ, dbus)
-3. ✓ Install Python packages in the correct environment
+1. ✓ Detect if Reticulum is in a venv, pipx, or system-wide
+2. ✓ Install system dependencies (BlueZ, dbus, build tools if needed)
+3. ✓ Install Python packages in the correct environment (via pipx inject if needed)
 4. ✓ Copy BLE interface files to `~/.reticulum/interfaces/` (or custom config directory if specified)
 5. ✓ Enable BlueZ experimental mode (required for proper BLE connectivity)
 6. ✓ Optionally set up Bluetooth permissions
@@ -148,6 +148,116 @@ sudo setcap 'cap_net_raw,cap_net_admin+eip' $(which python3)
 sudo setcap 'cap_net_raw,cap_net_admin+eip' /path/to/venv/bin/python3
 ```
 
+### Option C: pipx Installation (RNS installed via pipx)
+
+If you installed Reticulum via `pipx install rns`, the BLE interface requires additional setup because pipx creates isolated virtual environments that cannot access system-installed packages.
+
+**Note:** The automated installation script (Option A: `./install.sh`) now detects and handles pipx installations automatically. The instructions below are for manual installation or troubleshooting.
+
+#### 1. Install System Dependencies
+
+**Arch Linux:**
+```bash
+sudo pacman -S base-devel gobject-introspection python-dbus python-cairo bluez bluez-utils
+```
+
+**Debian/Ubuntu/Raspberry Pi OS:**
+```bash
+sudo apt-get update
+sudo apt-get install build-essential python3-dev python3-gi python3-dbus python3-cairo bluez libdbus-1-dev
+```
+
+#### 2. Inject BLE Dependencies into pipx Environment
+
+Because pipx creates isolated environments, you must inject the BLE dependencies into the RNS environment:
+
+```bash
+# Inject BLE dependencies into pipx RNS environment
+pipx inject rns bleak==1.1.1 bluezero dbus-python
+```
+
+**Note:** This will compile `dbus-python` from source, which requires the system development libraries installed in step 1.
+
+#### 3. Copy BLE Interface Files
+
+```bash
+# Copy to Reticulum's interface directory
+mkdir -p ~/.reticulum/interfaces
+cp src/RNS/Interfaces/BLE*.py ~/.reticulum/interfaces/
+```
+
+#### 4. Grant Bluetooth Permissions
+
+Find the Python executable used by pipx for RNS:
+
+```bash
+# Find pipx RNS Python path
+PIPX_RNS_PYTHON=$(pipx runpip rns show rns | grep Location | awk '{print $2}' | sed 's/lib\/python.*/bin\/python3/')
+
+# Grant capabilities
+sudo setcap 'cap_net_raw,cap_net_admin+eip' "$PIPX_RNS_PYTHON"
+```
+
+Alternatively, find the path manually:
+```bash
+# List pipx environments
+ls ~/.local/pipx/venvs/
+
+# Grant capabilities to the rns venv Python
+sudo setcap 'cap_net_raw,cap_net_admin+eip' ~/.local/pipx/venvs/rns/bin/python3
+```
+
+#### 5. Configure BlueZ
+
+The BLE interface requires BlueZ experimental features and automatic pairing configuration:
+
+**Enable Experimental Mode:**
+
+```bash
+# Edit BlueZ service configuration
+sudo systemctl edit bluetooth.service
+```
+
+Add the following content:
+```ini
+[Service]
+ExecStart=
+ExecStart=/usr/lib/bluetooth/bluetoothd --experimental
+```
+
+**Enable JustWorksRepairing for Automatic Pairing:**
+
+Edit `/etc/bluetooth/main.conf` and add to the `[General]` section:
+
+```ini
+[General]
+JustWorksRepairing = always
+```
+
+This enables automatic pairing for peer-initiated connections, which is required for zero-touch mesh networking. Reticulum provides its own cryptographic security on top of the BLE transport.
+
+**Apply Changes:**
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart bluetooth.service
+
+# Verify experimental mode is enabled
+systemctl status bluetooth.service | grep -i experimental
+
+# Verify JustWorksRepairing is set
+grep JustWorksRepairing /etc/bluetooth/main.conf
+```
+
+#### Why pipx Requires Special Handling
+
+pipx creates isolated virtual environments with `--no-site-packages` to prevent package conflicts. This means:
+- System packages like `python-dbus` (installed via apt/pacman) are not accessible
+- `dbus-python` must be compiled from source within the pipx environment
+- `pipx inject` installs packages directly into RNS's isolated environment
+
+This isolation is intentional and prevents conflicts, but requires the extra injection step for system-dependent packages like `dbus-python`.
+
 ## Quick Start
 
 ### 1. Configure Reticulum
@@ -250,6 +360,37 @@ These errors occur when BlueZ attempts Classic Bluetooth (BR/EDR) connections in
 **Solution:**
 Enable BlueZ experimental mode (see Installation → Manual Installation → step 4). If you used the automated installer, re-run it without `--skip-experimental`.
 
+### BLE pairing failures / "JustWorksRepairing: never" warning
+The BLE interface logs a warning that BlueZ's JustWorksRepairing is set to "never", which may cause pairing failures in the mesh network.
+
+**Symptoms:**
+- Warning: `BlueZ JustWorksRepairing: never (default - may cause pairing failures)`
+- Recommendation message: `Set JustWorksRepairing=always in /etc/bluetooth/main.conf`
+- Intermittent connection failures with peer devices
+- Pairing requests rejected by BlueZ
+
+**Cause:**
+BlueZ's default `JustWorksRepairing` setting is "never", which blocks automatic pairing for peer-initiated connections. This breaks zero-touch mesh networking.
+
+**Solution:**
+Enable JustWorksRepairing in BlueZ configuration (see Installation → Manual Installation → step 5). If you used the automated installer, this is configured automatically. To verify or fix manually:
+
+```bash
+# Edit BlueZ configuration
+sudo nano /etc/bluetooth/main.conf
+
+# Add to [General] section:
+JustWorksRepairing = always
+
+# Restart Bluetooth service
+sudo systemctl restart bluetooth
+
+# Verify the setting
+grep JustWorksRepairing /etc/bluetooth/main.conf
+```
+
+**Note:** Just Works pairing provides unauthenticated BLE encryption. This is acceptable because Reticulum provides its own cryptographic security on top of the BLE transport layer.
+
 ### Bluetooth adapter not powered / "No powered Bluetooth adapters found"
 The Bluetooth adapter exists but is powered off, preventing BLE operations.
 
@@ -294,6 +435,20 @@ sudo systemctl start bluetooth
 
 The automated installer (v1.x+) automatically checks and powers on the Bluetooth adapter during installation.
 
+### pipx: ModuleNotFoundError for dbus, gi, or bluezero
+If you installed RNS via pipx and get import errors like `ModuleNotFoundError: No module named 'dbus'`, `No module named 'gi'`, or `No module named 'bluezero'`:
+
+**Cause:** pipx creates isolated environments that don't access system packages.
+
+**Solution:** Follow the [pipx installation instructions](#option-c-pipx-installation-rns-installed-via-pipx) to inject the required dependencies:
+```bash
+pipx inject rns bleak==1.1.1 bluezero dbus-python
+```
+
+**Verification:** Test if the modules are accessible:
+```bash
+pipx run rns python3 -c "import dbus, gi, bleak, bluezero; print('All modules found')"
+```
 ## Architecture
 
 The BLE interface consists of four main components:

@@ -224,6 +224,7 @@ print_header "Checking for Reticulum"
 RNS_VENV=""
 RNS_PYTHON=""
 INSTALL_MODE=""
+PIPX_RNS_PATH=""
 
 # Add user's local bin to PATH if it exists (common pip install location)
 if [ -d "$HOME/.local/bin" ]; then
@@ -240,8 +241,41 @@ if command -v rnsd &> /dev/null; then
     if [ -n "$RNS_LOCATION" ]; then
         print_success "Found RNS Python package at: $RNS_LOCATION"
 
+        # Check if it's a pipx installation (most specific, check first)
+        if [[ "$RNS_LOCATION" == *"/pipx/venvs/"* ]]; then
+            print_info "RNS appears to be installed via pipx"
+
+            # Verify pipx command is available
+            if ! command -v pipx &> /dev/null; then
+                print_error "RNS is in a pipx path, but pipx command not found!"
+                echo
+                echo "Please install pipx:"
+                echo "  python3 -m pip install --user pipx"
+                echo "  python3 -m pipx ensurepath"
+                exit 1
+            fi
+
+            # Verify RNS is listed in pipx
+            if pipx list 2>/dev/null | grep -q "package rns"; then
+                INSTALL_MODE="pipx"
+
+                # Extract pipx venv path (e.g., ~/.local/pipx/venvs/rns)
+                PIPX_RNS_PATH=$(echo "$RNS_LOCATION" | grep -oP '^.*?/pipx/venvs/rns')
+                RNS_PYTHON="$PIPX_RNS_PATH/bin/python3"
+
+                if [ ! -f "$RNS_PYTHON" ]; then
+                    print_error "pipx Python not found at: $RNS_PYTHON"
+                    exit 1
+                fi
+
+                print_success "Detected pipx installation at: $PIPX_RNS_PATH"
+            else
+                print_error "RNS appears to be in pipx path, but 'pipx list' doesn't show it"
+                echo "Run 'pipx list' to verify your pipx installations"
+                exit 1
+            fi
         # Check if it's in a virtual environment
-        if [[ "$RNS_LOCATION" == *"/venv/"* ]] || [[ "$RNS_LOCATION" == *"/env/"* ]] || [[ "$VIRTUAL_ENV" != "" ]]; then
+        elif [[ "$RNS_LOCATION" == *"/venv/"* ]] || [[ "$RNS_LOCATION" == *"/env/"* ]] || [[ "$VIRTUAL_ENV" != "" ]]; then
             # RNS is in a venv
             if [ -n "$VIRTUAL_ENV" ]; then
                 RNS_VENV="$VIRTUAL_ENV"
@@ -323,9 +357,47 @@ echo
 # Step 3: Install Python dependencies
 print_header "Installing Python Dependencies"
 
-print_info "Installing pip packages (PyGObject, dbus-python, pycairo provided by system packages)"
+if [ "$INSTALL_MODE" = "pipx" ]; then
+    print_info "Installing dependencies via pipx inject..."
+    print_warning "dbus-python will be compiled from source (may take 2-3 minutes)"
+    echo
 
-if [ "$INSTALL_MODE" = "venv" ]; then
+    # Define dependencies (must match requirements.txt)
+    DEPS=("bleak==1.1.1" "bluezero" "dbus-python")
+
+    # Inject each dependency individually
+    for dep in "${DEPS[@]}"; do
+        print_info "Injecting $dep into RNS environment..."
+
+        if pipx inject rns "$dep"; then
+            print_success "Injected $dep"
+        else
+            print_error "Failed to inject $dep"
+            echo
+            echo "Common causes:"
+            echo "  - Missing system build dependencies (see above)"
+            echo "  - Network connectivity issues"
+            echo
+            echo "Try manually:"
+            echo "  pipx inject rns $dep --verbose"
+            exit 1
+        fi
+        echo
+    done
+
+    # Verify all modules can be imported
+    print_info "Verifying dependencies..."
+    if "$RNS_PYTHON" -c "import bleak, bluezero, dbus" 2>/dev/null; then
+        print_success "All dependencies verified and working"
+    else
+        print_error "Dependency verification failed"
+        echo
+        echo "Test imports manually:"
+        echo "  $RNS_PYTHON -c 'import bleak, bluezero, dbus'"
+        exit 1
+    fi
+
+elif [ "$INSTALL_MODE" = "venv" ]; then
     print_info "Installing to virtual environment: $RNS_VENV"
 
     if [ ! -f "$RNS_PYTHON" ]; then
@@ -447,9 +519,17 @@ else
         print_info "Running as root - skipping capability grant (not needed)"
         print_info "Root user already has all required Bluetooth permissions"
     elif command -v setcap &> /dev/null; then
-        # Get python3 path
-        PYTHON_PATH=$(which python3)
-        print_info "Detected Python at: $PYTHON_PATH"
+        # Determine correct Python path based on installation mode
+        if [ "$INSTALL_MODE" = "pipx" ]; then
+            PYTHON_PATH="$PIPX_RNS_PATH/bin/python3"
+            print_info "Using pipx Python: $PYTHON_PATH"
+        elif [ "$INSTALL_MODE" = "venv" ]; then
+            PYTHON_PATH="$RNS_VENV/bin/python3"
+            print_info "Using venv Python: $PYTHON_PATH"
+        else
+            PYTHON_PATH=$(which python3)
+            print_info "Using system Python: $PYTHON_PATH"
+        fi
 
         # Check if it's a symlink and resolve it
         if [ -L "$PYTHON_PATH" ]; then
@@ -701,6 +781,105 @@ if command -v bluetoothctl &> /dev/null; then
 else
     print_warning "bluetoothctl not available, cannot check adapter power state"
     print_info "Ensure Bluetooth adapter is powered on before running rnsd"
+fi
+
+echo
+
+# Step 5C: BlueZ JustWorksRepairing Configuration
+print_header "BlueZ JustWorksRepairing Configuration"
+
+BLUEZ_CONF="/etc/bluetooth/main.conf"
+
+if [ -f "$BLUEZ_CONF" ]; then
+    print_info "Checking JustWorksRepairing setting in $BLUEZ_CONF..."
+
+    # Extract current JustWorksRepairing setting (handle commented lines)
+    CURRENT_SETTING=$(grep -E "^#?\s*JustWorksRepairing\s*=" "$BLUEZ_CONF" 2>/dev/null | tail -1 | sed 's/.*=\s*//' | tr -d '[:space:]')
+
+    if [ "$CURRENT_SETTING" = "always" ]; then
+        print_success "JustWorksRepairing is already set to 'always'"
+    else
+        if [ -z "$CURRENT_SETTING" ]; then
+            print_info "JustWorksRepairing not found in config (using BlueZ default: never)"
+        else
+            print_info "JustWorksRepairing is currently set to: $CURRENT_SETTING"
+        fi
+
+        print_info "Setting JustWorksRepairing to 'always' for automatic BLE mesh pairing..."
+        echo
+        print_info "Background: BlueZ's JustWorksRepairing controls automatic pairing"
+        print_info "for peer-initiated connections. Setting to 'always' enables zero-touch"
+        print_info "mesh networking. Reticulum provides its own cryptographic security."
+        echo
+
+        # Modify the configuration file
+        if [ "$EUID" -eq 0 ]; then
+            # Running as root - no sudo needed
+            # First, comment out any existing JustWorksRepairing lines
+            sed -i 's/^\s*JustWorksRepairing\s*=.*/#&/' "$BLUEZ_CONF"
+
+            # Add our setting to the [General] section or append if no section exists
+            if grep -q "^\[General\]" "$BLUEZ_CONF"; then
+                # Insert after [General] section header
+                sed -i '/^\[General\]/a JustWorksRepairing = always' "$BLUEZ_CONF"
+            else
+                # No [General] section, append at end
+                echo "" >> "$BLUEZ_CONF"
+                echo "[General]" >> "$BLUEZ_CONF"
+                echo "JustWorksRepairing = always" >> "$BLUEZ_CONF"
+            fi
+
+            # Restart bluetooth service (non-fatal in container/CI environments)
+            print_info "Restarting bluetooth service to apply changes..."
+            systemctl daemon-reload 2>/dev/null || true
+            systemctl restart bluetooth 2>/dev/null || true
+        else
+            # Not root - use sudo
+            # First, comment out any existing JustWorksRepairing lines
+            sudo sed -i 's/^\s*JustWorksRepairing\s*=.*/#&/' "$BLUEZ_CONF"
+
+            # Add our setting to the [General] section or append if no section exists
+            if grep -q "^\[General\]" "$BLUEZ_CONF"; then
+                # Insert after [General] section header
+                sudo sed -i '/^\[General\]/a JustWorksRepairing = always' "$BLUEZ_CONF"
+            else
+                # No [General] section, append at end
+                echo "" | sudo tee -a "$BLUEZ_CONF" > /dev/null
+                echo "[General]" | sudo tee -a "$BLUEZ_CONF" > /dev/null
+                echo "JustWorksRepairing = always" | sudo tee -a "$BLUEZ_CONF" > /dev/null
+            fi
+
+            # Restart bluetooth service (non-fatal in container/CI environments)
+            print_info "Restarting bluetooth service to apply changes..."
+            sudo systemctl daemon-reload 2>/dev/null || true
+            sudo systemctl restart bluetooth 2>/dev/null || true
+        fi
+
+        # Verify the setting was applied
+        sleep 1
+        VERIFY_SETTING=$(grep -E "^JustWorksRepairing\s*=\s*always" "$BLUEZ_CONF" 2>/dev/null)
+        if [ -n "$VERIFY_SETTING" ]; then
+            print_success "JustWorksRepairing set to 'always' successfully"
+
+            # Verify bluetooth service is running (skip in container environments)
+            if systemctl is-active --quiet bluetooth 2>/dev/null; then
+                print_success "Bluetooth service restarted successfully"
+            elif command -v systemctl &> /dev/null && [ ! -f /.dockerenv ]; then
+                # Only show warning if systemctl exists and we're not in a container
+                print_warning "Bluetooth service may need manual restart"
+                print_info "Check status with: sudo systemctl status bluetooth"
+            else
+                # Container environment or systemd not available
+                print_info "Configuration updated (service restart skipped in container environment)"
+            fi
+        else
+            print_error "Failed to set JustWorksRepairing in $BLUEZ_CONF"
+            print_warning "You may need to manually add 'JustWorksRepairing = always' to [General] section"
+        fi
+    fi
+else
+    print_warning "$BLUEZ_CONF not found"
+    print_info "JustWorksRepairing configuration skipped (BlueZ may not be installed)"
 fi
 
 echo
