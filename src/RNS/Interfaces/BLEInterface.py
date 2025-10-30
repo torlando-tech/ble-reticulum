@@ -298,6 +298,7 @@ class BLEInterface(Interface):
     SERVICE_UUID = "00000001-5824-4f48-9e1a-3b3e8f0c1234"  # Custom Reticulum BLE service
     CHARACTERISTIC_RX_UUID = "00000002-5824-4f48-9e1a-3b3e8f0c1234"  # RX characteristic
     CHARACTERISTIC_TX_UUID = "00000003-5824-4f48-9e1a-3b3e8f0c1234"  # TX characteristic
+    CHARACTERISTIC_IDENTITY_UUID = "00000004-5824-4f48-9e1a-3b3e8f0c1234"  # Identity characteristic (Protocol v2)
 
     # Discovery and connection settings
     DISCOVERY_INTERVAL = 5.0  # seconds between discovery scans
@@ -500,6 +501,22 @@ class BLEInterface(Interface):
         # This workaround removes stale BLE paths on interface startup.
         # TODO: Remove when upstream Transport.py is fixed (see session notes)
         self._clear_stale_ble_paths()
+
+        # Protocol v2: Set Transport identity on GATT server for stable peer tracking
+        if self.gatt_server:
+            try:
+                import RNS.Transport as Transport
+                if hasattr(Transport, 'identity') and Transport.identity:
+                    identity_hash = Transport.identity.hash
+                    if identity_hash and len(identity_hash) == 16:
+                        self.gatt_server.set_transport_identity(identity_hash)
+                        RNS.log(f"{self} Set Transport identity on GATT server: {identity_hash.hex()}", RNS.LOG_INFO)
+                    else:
+                        RNS.log(f"{self} WARNING: Invalid Transport identity hash size: {len(identity_hash) if identity_hash else 0}", RNS.LOG_WARNING)
+                else:
+                    RNS.log(f"{self} WARNING: Transport.identity not available yet", RNS.LOG_WARNING)
+            except Exception as e:
+                RNS.log(f"{self} Error setting Transport identity: {e}", RNS.LOG_ERROR)
 
         self.online = True
         RNS.log(f"{self} started successfully", RNS.LOG_INFO)
@@ -1362,6 +1379,30 @@ class BLEInterface(Interface):
 
                 except Exception as e:
                     RNS.log(f"{self} service discovery failed: {type(e).__name__}: {e} (will retry)", RNS.LOG_WARNING)
+
+                # Read Identity characteristic (Protocol v2) if available
+                peer_identity_hash = None
+                if reticulum_service:
+                    try:
+                        identity_char = None
+                        for char in reticulum_service.characteristics:
+                            if char.uuid.lower() == BLEInterface.CHARACTERISTIC_IDENTITY_UUID.lower():
+                                identity_char = char
+                                break
+
+                        if identity_char:
+                            RNS.log(f"{self} reading Identity characteristic from {peer.name}...", RNS.LOG_DEBUG)
+                            identity_value = await client.read_gatt_char(identity_char)
+                            if identity_value and len(identity_value) == 16:
+                                peer_identity_hash = bytes(identity_value).hex()
+                                RNS.log(f"{self} received peer identity from {peer.name}: {peer_identity_hash}", RNS.LOG_INFO)
+                            else:
+                                RNS.log(f"{self} invalid identity size from {peer.name}: {len(identity_value) if identity_value else 0} bytes", RNS.LOG_WARNING)
+                        else:
+                            RNS.log(f"{self} Identity characteristic not found on {peer.name} (Protocol v1 device)", RNS.LOG_DEBUG)
+                    except Exception as e:
+                        RNS.log(f"{self} failed to read identity from {peer.name}: {type(e).__name__}: {e}", RNS.LOG_DEBUG)
+                        # Continue without identity
 
                 # Get negotiated MTU
                 try:
