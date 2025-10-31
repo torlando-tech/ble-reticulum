@@ -1602,9 +1602,8 @@ class BLEInterface(Interface):
         # Register with transport
         RNS.Transport.interfaces.append(peer_if)
 
-        # Register as tunnel for routing
-        if hasattr(self, 'owner') and self.owner:
-            self.owner.tunnel(peer_if)
+        # Note: No tunnel registration needed - direct peer connections use
+        # RNS.Transport.interfaces[] only (same pattern as I2PInterface)
 
         self.spawned_interfaces[conn_id] = peer_if
 
@@ -1773,9 +1772,8 @@ class BLEInterface(Interface):
         # Register with transport
         RNS.Transport.interfaces.append(peer_if)
 
-        # Register as tunnel for routing
-        if hasattr(self, 'owner') and self.owner:
-            self.owner.tunnel(peer_if)
+        # Note: No tunnel registration needed - direct peer connections use
+        # RNS.Transport.interfaces[] only (same pattern as I2PInterface)
 
         self.spawned_interfaces[conn_id] = peer_if
 
