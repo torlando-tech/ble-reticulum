@@ -898,6 +898,10 @@ class BLEInterface(Interface):
 
             def detection_callback(device, advertisement_data):
                 """Callback invoked for each discovered BLE device."""
+                # Debug: Log ALL devices to diagnose why matching fails
+                RNS.log(f"{self} DEBUG: Device {device.address} name={device.name} "
+                        f"service_uuids={advertisement_data.service_uuids} "
+                        f"local_name={advertisement_data.local_name}", RNS.LOG_DEBUG)
                 discovered_devices.append((device, advertisement_data))
 
             # Scan duration based on power mode
@@ -976,7 +980,9 @@ class BLEInterface(Interface):
                     RNS.log(f"{self} found matching peer {device_name} ({device.address}) via {match_method}, "
                             f"RSSI: {rssi}dBm (min: {self.min_rssi}dBm)", RNS.LOG_DEBUG)
 
-                    if rssi >= self.min_rssi:
+                    # Accept if RSSI meets minimum OR is -127 (BlueZ sentinel for "unknown")
+                    # -127 means BlueZ doesn't have RSSI data, but device is discoverable
+                    if rssi >= self.min_rssi or rssi == -127:
                         # Create or update DiscoveredPeer
                         if device.address in self.discovered_peers:
                             # Update existing peer's RSSI and timestamp
