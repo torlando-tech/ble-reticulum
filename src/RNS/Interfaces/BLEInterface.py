@@ -400,9 +400,13 @@ class BLEInterface(Interface):
         # State tracking
         self.peers = {}  # address -> (client, last_seen, mtu)
         self.peer_lock = threading.Lock()
-        self.spawned_interfaces = {}  # connection_id -> BLEPeerInterface
-                                       # connection_id format: "AA:BB:CC:DD:EE:FF-central" or "AA:BB:CC:DD:EE:FF-peripheral"
-                                       # Dual connections: Same peer has TWO interfaces (BitChat model)
+
+        # NEW: Identity-based interface tracking (unified dual-connection architecture)
+        self.spawned_interfaces = {}  # identity_hash -> BLEPeerInterface (unified interface per peer)
+                                       # OLD format (legacy): "AA:BB:CC:DD:EE:FF-central" or "AA:BB:CC:DD:EE:FF-peripheral"
+                                       # NEW format: identity_hash (first 16 hex chars of full hash)
+        self.address_to_identity = {}  # address -> peer_identity (16-byte identity)
+        self.identity_to_address = {}  # identity_hash -> address (for reverse lookup)
 
         # GATT server for peripheral mode
         self.gatt_server = None
@@ -1329,21 +1333,48 @@ class BLEInterface(Interface):
                     if peer.address in self.peers:
                         del self.peers[peer.address]
 
-                # 2. Clean up fragmentation state (prevent memory leak)
-                with self.frag_lock:
-                    if peer.address in self.fragmenters:
-                        del self.fragmenters[peer.address]
-                        RNS.log(f"{self} cleaned up fragmenter for {peer.address}", RNS.LOG_DEBUG)
-                    if peer.address in self.reassemblers:
-                        del self.reassemblers[peer.address]
-                        RNS.log(f"{self} cleaned up reassembler for {peer.address}", RNS.LOG_DEBUG)
+                # 2. Remove central connection from unified interface
+                peer_identity = self.address_to_identity.get(peer.address, None)
 
-                # 3. Detach spawned interface (central connection)
-                conn_id = f"{peer.address}-central"
-                if conn_id in self.spawned_interfaces:
-                    self.spawned_interfaces[conn_id].detach()
-                    del self.spawned_interfaces[conn_id]
-                    RNS.log(f"{self} cleaned up spawned interface for {peer.address}", RNS.LOG_DEBUG)
+                if peer_identity:
+                    # Protocol v2: Use identity-based lookup
+                    identity_hash = RNS.Identity.full_hash(peer_identity)[:16].hex()[:16]
+                    if identity_hash in self.spawned_interfaces:
+                        peer_if = self.spawned_interfaces[identity_hash]
+                        peer_if.remove_central_connection()
+
+                        # If no connections remain, detach and remove
+                        if not peer_if.has_central_connection and not peer_if.has_peripheral_connection:
+                            peer_if.detach()
+                            del self.spawned_interfaces[identity_hash]
+                            RNS.log(f"{self} detached unified interface for {peer.address} (no connections remain)", RNS.LOG_DEBUG)
+                else:
+                    # Protocol v1 fallback: Use address-based lookup
+                    conn_id = f"{peer.address}-central"
+                    if conn_id in self.spawned_interfaces:
+                        self.spawned_interfaces[conn_id].detach()
+                        del self.spawned_interfaces[conn_id]
+                        RNS.log(f"{self} cleaned up legacy spawned interface for {peer.address}", RNS.LOG_DEBUG)
+
+                # 3. Clean up fragmentation state only if no connections remain
+                should_cleanup_frag = True
+                if peer_identity:
+                    identity_hash = RNS.Identity.full_hash(peer_identity)[:16].hex()[:16]
+                    if identity_hash in self.spawned_interfaces:
+                        should_cleanup_frag = False  # Interface still has peripheral connection
+                else:
+                    # Check legacy peripheral connection
+                    if f"{peer.address}-peripheral" in self.spawned_interfaces:
+                        should_cleanup_frag = False
+
+                if should_cleanup_frag:
+                    with self.frag_lock:
+                        if peer.address in self.fragmenters:
+                            del self.fragmenters[peer.address]
+                            RNS.log(f"{self} cleaned up fragmenter for {peer.address}", RNS.LOG_DEBUG)
+                        if peer.address in self.reassemblers:
+                            del self.reassemblers[peer.address]
+                            RNS.log(f"{self} cleaned up reassembler for {peer.address}", RNS.LOG_DEBUG)
 
             # Try LE-specific connection if BlueZ >= 5.49 and we haven't confirmed ConnectDevice unavailable
             le_connection_attempted = False
@@ -1422,7 +1453,8 @@ class BLEInterface(Interface):
                     RNS.log(f"{self} service discovery failed: {type(e).__name__}: {e} (will retry)", RNS.LOG_WARNING)
 
                 # Read Identity characteristic (Protocol v2) if available
-                peer_identity_hash = None
+                peer_identity = None
+                identity_hash = None
                 if reticulum_service:
                     try:
                         identity_char = None
@@ -1435,8 +1467,15 @@ class BLEInterface(Interface):
                             RNS.log(f"{self} reading Identity characteristic from {peer.name}...", RNS.LOG_DEBUG)
                             identity_value = await client.read_gatt_char(identity_char)
                             if identity_value and len(identity_value) == 16:
-                                peer_identity_hash = bytes(identity_value).hex()
-                                RNS.log(f"{self} received peer identity from {peer.name}: {peer_identity_hash}", RNS.LOG_INFO)
+                                # Store as bytes for identity-based interface tracking
+                                peer_identity = bytes(identity_value)
+                                identity_hash = RNS.Identity.full_hash(peer_identity)[:16].hex()[:16]
+
+                                # Store identity mappings for unified interface architecture
+                                self.address_to_identity[peer.address] = peer_identity
+                                self.identity_to_address[identity_hash] = peer.address
+
+                                RNS.log(f"{self} received peer identity from {peer.name}: {identity_hash}", RNS.LOG_INFO)
                             else:
                                 RNS.log(f"{self} invalid identity size from {peer.name}: {len(identity_value) if identity_value else 0} bytes", RNS.LOG_WARNING)
                         else:
@@ -1480,8 +1519,15 @@ class BLEInterface(Interface):
                     self.fragmenters[peer.address] = BLEFragmenter(mtu=mtu)
                     self.reassemblers[peer.address] = BLEReassembler(timeout=self.connection_timeout)
 
-                # Create spawned peer interface
-                self._spawn_peer_interface(peer.address, peer.name)
+                # Create or update unified peer interface with central connection
+                self._spawn_or_update_peer_interface(
+                    address=peer.address,
+                    name=peer.name,
+                    peer_identity=peer_identity,  # May be None for Protocol v1 devices
+                    client=client,
+                    mtu=mtu,
+                    connection_type="central"
+                )
 
                 # Set up notification handler for incoming data
                 RNS.log(f"{self} setting up TX characteristic notifications for {peer.name}...", RNS.LOG_INFO)
@@ -1585,29 +1631,60 @@ class BLEInterface(Interface):
                 RNS.log(f"{self} failed to connect to {peer.name} ({peer.address}): "
                         f"{error_type}: {e}, failures={peer.failed_connections}", RNS.LOG_WARNING)
 
-    def _spawn_peer_interface(self, address, name, connection_type="central"):
+    def _spawn_or_update_peer_interface(self, address, name, peer_identity=None, client=None, mtu=None, connection_type="central"):
         """
-        Create a spawned peer interface for a connected device.
+        Create or update a unified peer interface that can handle both central and peripheral connections.
+
+        This implements the unified interface architecture where one BLEPeerInterface manages
+        both connection types for a given peer identity, eliminating duplicate interfaces.
 
         Args:
             address: BLE address of peer
             name: Name of peer device
+            peer_identity: 16-byte peer identity (None for Protocol v1 legacy devices)
+            client: BleakClient instance (for central connections)
+            mtu: Negotiated MTU (for central connections)
             connection_type: "central" (we connected to them) or "peripheral" (they connected to us)
+
+        Returns:
+            BLEPeerInterface: The spawned or updated interface
         """
-        conn_id = f"{address}-{connection_type}"
+        # Compute lookup key: identity_hash for v2, address-based for v1 legacy
+        if peer_identity:
+            identity_hash = RNS.Identity.full_hash(peer_identity)[:16].hex()[:16]
+        else:
+            # Legacy Protocol v1 device - use address-based key
+            identity_hash = f"{address}-{connection_type}"
+            RNS.log(f"{self} no identity for {name}, using legacy address-based tracking", RNS.LOG_DEBUG)
 
-        if conn_id in self.spawned_interfaces:
-            return  # Already spawned
+        # Check if unified interface already exists for this peer
+        if identity_hash in self.spawned_interfaces:
+            peer_if = self.spawned_interfaces[identity_hash]
 
-        peer_if = BLEPeerInterface(self, address, name)
+            # Add the new connection type to existing interface
+            if connection_type == "central":
+                peer_if.add_central_connection(client, mtu)
+                RNS.log(f"{self} added central connection to existing interface for {name} (now {peer_if._get_connection_state_str()})", RNS.LOG_INFO)
+            else:  # peripheral
+                peer_if.add_peripheral_connection()
+                RNS.log(f"{self} added peripheral connection to existing interface for {name} (now {peer_if._get_connection_state_str()})", RNS.LOG_INFO)
+
+            return peer_if
+
+        # Create new unified interface
+        peer_if = BLEPeerInterface(self, address, name, peer_identity)
         peer_if.OUT = self.OUT
         peer_if.IN = self.IN
         peer_if.parent_interface = self
         peer_if.bitrate = self.bitrate
         peer_if.HW_MTU = self.HW_MTU
         peer_if.online = True
-        peer_if.connection_type = connection_type
-        peer_if.is_peripheral_connection = (connection_type == "peripheral")
+
+        # Add the first connection
+        if connection_type == "central":
+            peer_if.add_central_connection(client, mtu)
+        else:  # peripheral
+            peer_if.add_peripheral_connection()
 
         # Register with transport
         RNS.Transport.interfaces.append(peer_if)
@@ -1615,9 +1692,13 @@ class BLEInterface(Interface):
         # Note: No tunnel registration needed - direct peer connections use
         # RNS.Transport.interfaces[] only (same pattern as I2PInterface)
 
-        self.spawned_interfaces[conn_id] = peer_if
+        # Store in unified tracking
+        self.spawned_interfaces[identity_hash] = peer_if
 
-        RNS.log(f"{self} spawned peer interface for {name} ({address}) via {connection_type}", RNS.LOG_DEBUG)
+        identity_str = identity_hash[:8] if peer_identity else "legacy"
+        RNS.log(f"{self} created NEW unified interface for {name} ({identity_str}), state: {peer_if._get_connection_state_str()}", RNS.LOG_INFO)
+
+        return peer_if
 
     def _handle_ble_data(self, peer_address, data):
         """
@@ -1652,15 +1733,21 @@ class BLEInterface(Interface):
 
                 # Log fragmentation statistics for this peer
                 stats = reassembler.get_statistics()
-                # Try to get peer name from either connection type
-                central_id = f"{peer_address}-central"
-                periph_id = f"{peer_address}-peripheral"
-                if central_id in self.spawned_interfaces:
-                    peer_name = self.spawned_interfaces[central_id].peer_name
-                elif periph_id in self.spawned_interfaces:
-                    peer_name = self.spawned_interfaces[periph_id].peer_name
+                # Get peer name from unified interface lookup
+                peer_identity = self.address_to_identity.get(peer_address, None)
+                peer_if = None
+
+                if peer_identity:
+                    # Protocol v2: identity-based lookup
+                    identity_hash = RNS.Identity.full_hash(peer_identity)[:16].hex()[:16]
+                    peer_if = self.spawned_interfaces.get(identity_hash, None)
                 else:
-                    peer_name = peer_address[-8:]
+                    # Protocol v1 fallback: try address-based lookup
+                    peer_if = self.spawned_interfaces.get(f"{peer_address}-central", None)
+                    if not peer_if:
+                        peer_if = self.spawned_interfaces.get(f"{peer_address}-peripheral", None)
+
+                peer_name = peer_if.peer_name if peer_if else peer_address[-8:]
                 RNS.log(f"{self} reassembled packet from {peer_name}: "
                         f"total_packets={stats['packets_reassembled']}, "
                         f"total_fragments={stats['fragments_received']}, "
@@ -1671,10 +1758,23 @@ class BLEInterface(Interface):
             RNS.log(f"{self} error reassembling fragment from {peer_address}: {type(e).__name__}: {e}", RNS.LOG_ERROR)
             return
 
-        # If we have a complete packet, pass to peer interface (central connection)
-        conn_id = f"{peer_address}-central"
-        if complete_packet and conn_id in self.spawned_interfaces:
-            self.spawned_interfaces[conn_id].process_incoming(complete_packet)
+        # If we have a complete packet, route to unified peer interface
+        if complete_packet:
+            peer_identity = self.address_to_identity.get(peer_address, None)
+            peer_if = None
+
+            if peer_identity:
+                # Protocol v2: identity-based lookup
+                identity_hash = RNS.Identity.full_hash(peer_identity)[:16].hex()[:16]
+                peer_if = self.spawned_interfaces.get(identity_hash, None)
+            else:
+                # Protocol v1 fallback: address-based lookup (try central first)
+                peer_if = self.spawned_interfaces.get(f"{peer_address}-central", None)
+
+            if peer_if:
+                peer_if.process_incoming(complete_packet)
+            else:
+                RNS.log(f"{self} no interface found for peer {peer_address}, packet dropped", RNS.LOG_WARNING)
 
     def handle_peripheral_data(self, data, sender_address):
         """
@@ -1688,11 +1788,8 @@ class BLEInterface(Interface):
         """
         RNS.log(f"{self} received {len(data)} bytes from central {sender_address}", RNS.LOG_EXTREME)
 
-        # If sender not in peers, create peer state (peripheral connection)
-        conn_id = f"{sender_address}-peripheral"
-        if conn_id not in self.spawned_interfaces:
-            # Create peer interface for this central
-            self._create_peripheral_peer(sender_address)
+        # NOTE: Interface creation is handled by handle_central_connected() callback
+        # which is called when the central first connects (via handshake write)
 
         # Update fragmenter MTU if GATT server has learned a new MTU
         # (MTU is provided by BlueZ in write callback options)
@@ -1726,15 +1823,21 @@ class BLEInterface(Interface):
 
                     # Log fragmentation statistics for this central
                     stats = self.reassemblers[sender_address].get_statistics()
-                    # Try to get peer name from either connection type
-                    central_id = f"{sender_address}-central"
-                    periph_id = f"{sender_address}-peripheral"
-                    if central_id in self.spawned_interfaces:
-                        peer_name = self.spawned_interfaces[central_id].peer_name
-                    elif periph_id in self.spawned_interfaces:
-                        peer_name = self.spawned_interfaces[periph_id].peer_name
+                    # Get peer name from unified interface lookup
+                    peer_identity = self.address_to_identity.get(sender_address, None)
+                    peer_if = None
+
+                    if peer_identity:
+                        # Protocol v2: identity-based lookup
+                        identity_hash = RNS.Identity.full_hash(peer_identity)[:16].hex()[:16]
+                        peer_if = self.spawned_interfaces.get(identity_hash, None)
                     else:
-                        peer_name = sender_address[-8:]
+                        # Protocol v1 fallback: try address-based lookup
+                        peer_if = self.spawned_interfaces.get(f"{sender_address}-peripheral", None)
+                        if not peer_if:
+                            peer_if = self.spawned_interfaces.get(f"{sender_address}-central", None)
+
+                    peer_name = peer_if.peer_name if peer_if else sender_address[-8:]
                     RNS.log(f"{self} reassembled packet from {peer_name}: "
                             f"total_packets={stats['packets_reassembled']}, "
                             f"total_fragments={stats['fragments_received']}, "
@@ -1745,14 +1848,24 @@ class BLEInterface(Interface):
                 RNS.log(f"{self} error reassembling fragment from central {sender_address}: {type(e).__name__}: {e}", RNS.LOG_ERROR)
                 return
 
-        # If we have a complete packet, pass to peer interface (peripheral connection)
-        conn_id = f"{sender_address}-peripheral"
-        if complete_packet and conn_id in self.spawned_interfaces:
-            RNS.log(f"{self} DIAGNOSTIC: Calling process_incoming() on {conn_id} with {len(complete_packet)} bytes", RNS.LOG_DEBUG)
-            self.spawned_interfaces[conn_id].process_incoming(complete_packet)
-            RNS.log(f"{self} DIAGNOSTIC: process_incoming() completed for {conn_id}", RNS.LOG_DEBUG)
-        elif complete_packet and conn_id not in self.spawned_interfaces:
-            RNS.log(f"{self} DIAGNOSTIC: Complete packet ready but peer {conn_id} not in spawned_interfaces!", RNS.LOG_WARNING)
+        # If we have a complete packet, route to unified peer interface
+        if complete_packet:
+            peer_identity = self.address_to_identity.get(sender_address, None)
+            peer_if = None
+
+            if peer_identity:
+                # Protocol v2: identity-based lookup
+                identity_hash = RNS.Identity.full_hash(peer_identity)[:16].hex()[:16]
+                peer_if = self.spawned_interfaces.get(identity_hash, None)
+            else:
+                # Protocol v1 fallback: address-based lookup (try peripheral first)
+                peer_if = self.spawned_interfaces.get(f"{sender_address}-peripheral", None)
+
+            if peer_if:
+                RNS.log(f"{self} DIAGNOSTIC: Routing packet to {peer_if}", RNS.LOG_DEBUG)
+                peer_if.process_incoming(complete_packet)
+            else:
+                RNS.log(f"{self} DIAGNOSTIC: No interface found for {sender_address}, packet dropped!", RNS.LOG_WARNING)
         elif not complete_packet:
             RNS.log(f"{self} DIAGNOSTIC: No complete packet yet from {sender_address} (waiting for more fragments)", RNS.LOG_DEBUG)
 
@@ -1807,41 +1920,76 @@ class BLEInterface(Interface):
         """
         Handle a central device connecting to our GATT server.
 
-        This method creates the peer interface IMMEDIATELY to enable the
-        peripheral connection check in _connect_to_peer() to work properly.
-        This prevents duplicate central connection attempts from both sides.
+        With the unified interface architecture, this either creates a new interface
+        or adds a peripheral connection to an existing interface for this peer.
 
         Args:
             address: BLE address of the central device
         """
-        RNS.log(f"{self} central {address} connected to our peripheral, creating peer interface immediately", RNS.LOG_INFO)
+        RNS.log(f"{self} central {address} connected to our peripheral", RNS.LOG_INFO)
 
-        # Create peer interface immediately (not on first data)
-        # This ensures the peripheral connection check in _connect_to_peer() works
-        self._create_peripheral_peer(address)
+        # Look up peer identity if we have it (from when we connected as central)
+        peer_identity = self.address_to_identity.get(address, None)
+
+        # Create or update unified interface with peripheral connection
+        self._spawn_or_update_peer_interface(
+            address=address,
+            name=f"Central-{address[-8:]}",  # Will be updated if we learn better name
+            peer_identity=peer_identity,  # May be None if we haven't connected as central yet
+            client=None,  # No client for peripheral connections
+            mtu=None,  # MTU managed by GATT server
+            connection_type="peripheral"
+        )
 
     def handle_central_disconnected(self, address):
         """
         Handle a central device disconnecting from our GATT server.
+
+        With unified interface architecture, this removes the peripheral connection
+        from the interface. The interface is only detached if no connections remain.
 
         Args:
             address: BLE address of the central device
         """
         RNS.log(f"{self} central disconnected: {address}", RNS.LOG_INFO)
 
-        # Clean up peripheral peer interface (they connected to us)
-        conn_id = f"{address}-peripheral"
-        if conn_id in self.spawned_interfaces:
-            peer_if = self.spawned_interfaces[conn_id]
-            peer_if.detach()
-            del self.spawned_interfaces[conn_id]
-            RNS.log(f"{self} cleaned up peripheral peer interface for {address}", RNS.LOG_DEBUG)
+        # Look up peer identity
+        peer_identity = self.address_to_identity.get(address, None)
 
-        # Only clean up shared fragmenter/reassembler if NO connections remain to this peer
-        # Check if central connection still exists
-        central_conn_id = f"{address}-central"
-        if central_conn_id not in self.spawned_interfaces:
-            # No central connection either - safe to clean up shared state
+        if peer_identity:
+            # Protocol v2: Use identity-based lookup
+            identity_hash = RNS.Identity.full_hash(peer_identity)[:16].hex()[:16]
+            if identity_hash in self.spawned_interfaces:
+                peer_if = self.spawned_interfaces[identity_hash]
+                peer_if.remove_peripheral_connection()
+
+                # If no connections remain, detach and remove interface
+                if not peer_if.has_central_connection and not peer_if.has_peripheral_connection:
+                    peer_if.detach()
+                    del self.spawned_interfaces[identity_hash]
+                    RNS.log(f"{self} detached unified interface for {address} (no connections remain)", RNS.LOG_DEBUG)
+        else:
+            # Protocol v1 fallback: Use address-based lookup
+            conn_id = f"{address}-peripheral"
+            if conn_id in self.spawned_interfaces:
+                peer_if = self.spawned_interfaces[conn_id]
+                peer_if.detach()
+                del self.spawned_interfaces[conn_id]
+                RNS.log(f"{self} cleaned up legacy peripheral peer interface for {address}", RNS.LOG_DEBUG)
+
+        # Clean up shared fragmenter/reassembler only if NO connections remain
+        # Check both v2 (identity-based) and v1 (address-based) tracking
+        should_cleanup = True
+        if peer_identity:
+            identity_hash = RNS.Identity.full_hash(peer_identity)[:16].hex()[:16]
+            if identity_hash in self.spawned_interfaces:
+                should_cleanup = False  # Interface still exists
+        else:
+            # Check if any address-based interface exists
+            if f"{address}-central" in self.spawned_interfaces:
+                should_cleanup = False
+
+        if should_cleanup:
             with self.frag_lock:
                 if address in self.reassemblers:
                     del self.reassemblers[address]
@@ -1971,23 +2119,33 @@ class BLEPeerInterface(Interface):
     interfaces for routing and statistics tracking.
     """
 
-    def __init__(self, parent, peer_address, peer_name):
+    def __init__(self, parent, peer_address, peer_name, peer_identity=None):
         """
         Initialize peer interface.
+
+        This interface can now handle BOTH central and peripheral connections
+        to the same peer identity, eliminating duplicate interfaces and fixing
+        ACK routing issues.
 
         Args:
             parent: Parent BLEInterface
             peer_address: BLE address of peer
             peer_name: Name of peer device
+            peer_identity: 16-byte peer identity from GATT characteristic (optional, can be set later)
         """
         super().__init__()
 
         self.parent_interface = parent
         self.peer_address = peer_address
         self.peer_name = peer_name
+        self.peer_identity = peer_identity  # 16-byte identity for stable tracking
         self.online = True
-        self.connection_type = "central"  # Will be set by creator ("central" or "peripheral")
-        self.is_peripheral_connection = False  # Will be set by creator based on connection_type
+
+        # Dual connection state tracking
+        self.has_central_connection = False  # True if we connected to them
+        self.has_peripheral_connection = False  # True if they connected to us
+        self.central_client = None  # BleakClient reference (if central connection exists)
+        self.central_mtu = None  # MTU for central connection
 
         # Copy settings from parent
         self.HW_MTU = parent.HW_MTU
@@ -1999,7 +2157,70 @@ class BLEPeerInterface(Interface):
         # Announce rate limiting (required by Transport.inbound announce processing)
         self.announce_rate_target = None  # No announce rate limiting for BLE peer interfaces
 
-        RNS.log(f"BLEPeerInterface initialized for {peer_name} ({peer_address})", RNS.LOG_DEBUG)
+        RNS.log(f"BLEPeerInterface initialized for {peer_name} ({peer_address}), identity={'set' if peer_identity else 'pending'}", RNS.LOG_DEBUG)
+
+    def add_central_connection(self, client, mtu):
+        """
+        Add a central connection to this peer interface.
+
+        Called when we successfully connect as a GATT client to this peer.
+
+        Args:
+            client: BleakClient instance
+            mtu: Negotiated MTU for this connection
+        """
+        self.has_central_connection = True
+        self.central_client = client
+        self.central_mtu = mtu
+        conn_state = self._get_connection_state_str()
+        RNS.log(f"{self} added central connection (MTU: {mtu}), state now: {conn_state}", RNS.LOG_DEBUG)
+
+    def add_peripheral_connection(self):
+        """
+        Add a peripheral connection to this peer interface.
+
+        Called when this peer connects as a GATT client to our GATT server.
+        """
+        self.has_peripheral_connection = True
+        conn_state = self._get_connection_state_str()
+        RNS.log(f"{self} added peripheral connection, state now: {conn_state}", RNS.LOG_DEBUG)
+
+    def remove_central_connection(self):
+        """Remove the central connection from this peer interface."""
+        if self.has_central_connection:
+            self.has_central_connection = False
+            self.central_client = None
+            self.central_mtu = None
+            conn_state = self._get_connection_state_str()
+            RNS.log(f"{self} removed central connection, state now: {conn_state}", RNS.LOG_DEBUG)
+
+            # Mark offline if no connections remain
+            if not self.has_peripheral_connection:
+                self.online = False
+                RNS.log(f"{self} no connections remain, marking offline", RNS.LOG_DEBUG)
+
+    def remove_peripheral_connection(self):
+        """Remove the peripheral connection from this peer interface."""
+        if self.has_peripheral_connection:
+            self.has_peripheral_connection = False
+            conn_state = self._get_connection_state_str()
+            RNS.log(f"{self} removed peripheral connection, state now: {conn_state}", RNS.LOG_DEBUG)
+
+            # Mark offline if no connections remain
+            if not self.has_central_connection:
+                self.online = False
+                RNS.log(f"{self} no connections remain, marking offline", RNS.LOG_DEBUG)
+
+    def _get_connection_state_str(self):
+        """Get a string describing the current connection state."""
+        if self.has_central_connection and self.has_peripheral_connection:
+            return "central+peripheral"
+        elif self.has_central_connection:
+            return "central only"
+        elif self.has_peripheral_connection:
+            return "peripheral only"
+        else:
+            return "no connections"
 
     def process_incoming(self, data):
         """
@@ -2029,6 +2250,11 @@ class BLEPeerInterface(Interface):
         """
         Process outgoing data to send to this peer (with fragmentation).
 
+        This method intelligently selects the best available connection path:
+        - If both central and peripheral connections exist, prefer central (lower latency)
+        - If only one connection exists, use that path
+        - Falls back gracefully if one path fails
+
         Args:
             data: Raw packet data to transmit
         """
@@ -2057,15 +2283,25 @@ class BLEPeerInterface(Interface):
             RNS.log(f"Failed to fragment data for {self.peer_name}: {e}", RNS.LOG_ERROR)
             return
 
-        # Route based on connection type
-        if self.is_peripheral_connection:
-            # This peer is connected as a central to our GATT server
-            # Send via server notifications
+        # Intelligently route based on available connections
+        if self.has_central_connection and self.has_peripheral_connection:
+            # Both paths available - prefer central for lower latency
+            RNS.log(f"{self} using central path (both connections available)", RNS.LOG_EXTREME)
+            success = self._send_via_central(fragments)
+            if not success:
+                # Fallback to peripheral if central fails
+                RNS.log(f"{self} central send failed, falling back to peripheral", RNS.LOG_WARNING)
+                self._send_via_peripheral(fragments)
+        elif self.has_central_connection:
+            # Only central connection available
+            RNS.log(f"{self} using central path (only connection)", RNS.LOG_EXTREME)
+            self._send_via_central(fragments)
+        elif self.has_peripheral_connection:
+            # Only peripheral connection available
+            RNS.log(f"{self} using peripheral path (only connection)", RNS.LOG_EXTREME)
             self._send_via_peripheral(fragments)
         else:
-            # This peer is connected via central mode
-            # Send via GATT characteristic write
-            self._send_via_central(fragments)
+            RNS.log(f"{self} no connections available for transmission!", RNS.LOG_ERROR)
 
     def _send_via_peripheral(self, fragments):
         """
@@ -2073,10 +2309,13 @@ class BLEPeerInterface(Interface):
 
         Args:
             fragments: List of fragment bytes to send
+
+        Returns:
+            bool: True if all fragments sent successfully, False otherwise
         """
         if not self.parent_interface.gatt_server:
             RNS.log(f"No GATT server available for {self.peer_name}", RNS.LOG_ERROR)
-            return
+            return False
 
         for i, fragment in enumerate(fragments):
             try:
@@ -2094,7 +2333,9 @@ class BLEPeerInterface(Interface):
 
             except Exception as e:
                 RNS.log(f"Failed to send notification {i+1}/{len(fragments)} to {self.peer_name}: {e}", RNS.LOG_ERROR)
-                return
+                return False
+
+        return True
 
     def _send_via_central(self, fragments):
         """
@@ -2102,23 +2343,27 @@ class BLEPeerInterface(Interface):
 
         Args:
             fragments: List of fragment bytes to send
-        """
-        # Get BLE client for this peer (minimize lock hold time to avoid deadlock)
-        # FIX: Don't hold peer_lock during blocking I/O operations
-        client = None
-        with self.parent_interface.peer_lock:
-            if self.peer_address not in self.parent_interface.peers:
-                RNS.log(f"{self} peer {self.peer_name} ({self.peer_address}) no longer connected", RNS.LOG_WARNING)
-                return
 
-            # Get reference to client and release lock immediately
-            # Note: MTU is stored in peers tuple but already used during fragmenter creation
-            client, _, _ = self.parent_interface.peers[self.peer_address]
+        Returns:
+            bool: True if all fragments sent successfully, False otherwise
+        """
+        # Use stored central_client if available (dual-connection architecture)
+        client = self.central_client if self.has_central_connection else None
+
+        # Fallback to legacy peers dict lookup (for compatibility during transition)
+        if not client:
+            with self.parent_interface.peer_lock:
+                if self.peer_address not in self.parent_interface.peers:
+                    RNS.log(f"{self} peer {self.peer_name} ({self.peer_address}) no longer connected", RNS.LOG_WARNING)
+                    return False
+
+                # Get reference to client and release lock immediately
+                client, _, _ = self.parent_interface.peers[self.peer_address]
 
         # Check if client is still connected before sending
-        if not client.is_connected:
+        if not client or not client.is_connected:
             RNS.log(f"{self} peer {self.peer_name} ({self.peer_address}) disconnected before transmission", RNS.LOG_WARNING)
-            return
+            return False
 
         # Send each fragment via BLE characteristic write
         for i, fragment in enumerate(fragments):
@@ -2138,7 +2383,7 @@ class BLEPeerInterface(Interface):
             except asyncio.TimeoutError:
                 RNS.log(f"{self} timeout sending fragment {i+1}/{len(fragments)} to {self.peer_name}, "
                         f"packet lost (Reticulum will retransmit)", RNS.LOG_WARNING)
-                return
+                return False
 
             # HIGH #3: Comprehensive asyncio exception handling
             except (asyncio.CancelledError, RuntimeError) as e:
@@ -2148,12 +2393,12 @@ class BLEPeerInterface(Interface):
                 if isinstance(e, RuntimeError) and "closed" in str(e).lower():
                     RNS.log(f"{self} event loop is closed, marking interface offline", RNS.LOG_ERROR)
                     self.parent_interface.online = False
-                return
+                return False
 
             except ConnectionError as e:
                 RNS.log(f"{self} connection lost to {self.peer_name} while sending fragment {i+1}/{len(fragments)}: "
                         f"{type(e).__name__}: {e}, packet lost", RNS.LOG_WARNING)
-                return
+                return False
 
             except Exception as e:
                 error_type = type(e).__name__
@@ -2161,7 +2406,9 @@ class BLEPeerInterface(Interface):
                         f"{error_type}: {e}, packet lost (Reticulum will retransmit)", RNS.LOG_WARNING)
                 # If one fragment fails, the whole packet is lost
                 # Reticulum's upper layers will handle retransmission
-                return
+                return False
+
+        return True
 
     def detach(self):
         """Detach this peer interface."""
@@ -2180,10 +2427,18 @@ class BLEPeerInterface(Interface):
     @property
     def connection_id(self):
         """Get the unique connection ID for this peer interface"""
-        return f"{self.peer_address}-{self.connection_type}"
+        # For unified interfaces, use identity hash if available, otherwise address
+        if self.peer_identity:
+            try:
+                import RNS
+                identity_hash = RNS.Identity.full_hash(self.peer_identity)[:16].hex()[:8]
+                return f"{identity_hash}"
+            except:
+                pass
+        return f"{self.peer_address}"
 
     def __str__(self):
-        return f"BLEPeerInterface[{self.peer_name}/{self.connection_type}]"
+        return f"BLEPeerInterface[{self.peer_name}/{self._get_connection_state_str()}]"
 
 
 # Register interface for Reticulum
