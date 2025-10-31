@@ -1595,6 +1595,11 @@ class BLEInterface(Interface):
 
         # Register with transport
         RNS.Transport.interfaces.append(peer_if)
+
+        # Register as tunnel for routing
+        if hasattr(self, 'owner') and self.owner:
+            self.owner.tunnel(peer_if)
+
         self.spawned_interfaces[conn_id] = peer_if
 
         RNS.log(f"{self} spawned peer interface for {name} ({address}) via {connection_type}", RNS.LOG_DEBUG)
@@ -1761,6 +1766,11 @@ class BLEInterface(Interface):
 
         # Register with transport
         RNS.Transport.interfaces.append(peer_if)
+
+        # Register as tunnel for routing
+        if hasattr(self, 'owner') and self.owner:
+            self.owner.tunnel(peer_if)
+
         self.spawned_interfaces[conn_id] = peer_if
 
         # Create fragmenter using negotiated MTU from GATT server (if available)
