@@ -295,10 +295,10 @@ class BLEInterface(Interface):
     DEFAULT_IFAC_SIZE = 16
 
     # BLE-specific constants
-    SERVICE_UUID = "00000001-5824-4f48-9e1a-3b3e8f0c1234"  # Custom Reticulum BLE service
-    CHARACTERISTIC_RX_UUID = "00000002-5824-4f48-9e1a-3b3e8f0c1234"  # RX characteristic
-    CHARACTERISTIC_TX_UUID = "00000003-5824-4f48-9e1a-3b3e8f0c1234"  # TX characteristic
-    CHARACTERISTIC_IDENTITY_UUID = "00000004-5824-4f48-9e1a-3b3e8f0c1234"  # Identity characteristic (Protocol v2)
+    SERVICE_UUID = "37145b00-442d-4a94-917f-8f42c5da28e3"  # Custom Reticulum BLE service
+    CHARACTERISTIC_RX_UUID = "37145b00-442d-4a94-917f-8f42c5da28e5"  # RX characteristic
+    CHARACTERISTIC_TX_UUID = "37145b00-442d-4a94-917f-8f42c5da28e4"  # TX characteristic
+    CHARACTERISTIC_IDENTITY_UUID = "37145b00-442d-4a94-917f-8f42c5da28e6"  # Identity characteristic (Protocol v2)
 
     # Discovery and connection settings
     DISCOVERY_INTERVAL = 5.0  # seconds between discovery scans

@@ -57,16 +57,16 @@ class BLEGATTServer:
     """
 
     # Service UUID for Reticulum BLE
-    SERVICE_UUID = "00000001-5824-4f48-9e1a-3b3e8f0c1234"
+    SERVICE_UUID = "37145b00-442d-4a94-917f-8f42c5da28e3"
 
     # RX Characteristic: Centrals write to this (we receive)
-    RX_CHAR_UUID = "00000002-5824-4f48-9e1a-3b3e8f0c1234"
+    RX_CHAR_UUID = "37145b00-442d-4a94-917f-8f42c5da28e5"
 
     # TX Characteristic: We notify on this (centrals receive)
-    TX_CHAR_UUID = "00000003-5824-4f48-9e1a-3b3e8f0c1234"
+    TX_CHAR_UUID = "37145b00-442d-4a94-917f-8f42c5da28e4"
 
     # Identity Characteristic: Centrals read this to get stable node identity (Protocol v2)
-    IDENTITY_CHAR_UUID = "00000004-5824-4f48-9e1a-3b3e8f0c1234"
+    IDENTITY_CHAR_UUID = "37145b00-442d-4a94-917f-8f42c5da28e6"
 
     def __init__(self, interface, device_name: str = "Reticulum-Node", agent_capability: str = "NoInputNoOutput"):
         """
