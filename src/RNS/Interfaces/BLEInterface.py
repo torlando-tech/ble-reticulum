@@ -488,22 +488,6 @@ class BLEInterface(Interface):
         else:
             RNS.log(f"{self} central mode disabled, skipping peer discovery", RNS.LOG_INFO)
 
-        # Protocol v2: Wait for Transport.identity BEFORE starting GATT server
-        # This ensures the Identity characteristic is created with a valid value,
-        # preventing BlueZ from rejecting/corrupting the advertisement
-        if self.gatt_server:
-            RNS.log(f"{self} Waiting for Transport.identity before starting GATT server...", RNS.LOG_DEBUG)
-            identity_hash = self._wait_for_transport_identity(timeout=30)
-            if identity_hash:
-                self.gatt_server.set_transport_identity(identity_hash)
-                RNS.log(f"{self} Transport.identity set on GATT server: {identity_hash.hex()}", RNS.LOG_INFO)
-            else:
-                RNS.log(f"{self} WARNING: Starting GATT server without identity (Protocol v1 mode)", RNS.LOG_WARNING)
-
-        # Start GATT server if peripheral mode is enabled
-        if self.gatt_server:
-            asyncio.run_coroutine_threadsafe(self._start_server(), self.loop)
-
         # Start periodic cleanup task (CRITICAL #2: prevent unbounded reassembly buffer growth)
         asyncio.run_coroutine_threadsafe(self._periodic_cleanup(), self.loop)
 
@@ -514,7 +498,25 @@ class BLEInterface(Interface):
         # TODO: Remove when upstream Transport.py is fixed (see session notes)
         self._clear_stale_ble_paths()
 
+        # Set interface online FIRST to allow Reticulum to complete startup
+        # (Transport.identity is loaded after interfaces are online)
         self.online = True
+        RNS.log(f"{self} interface online, waiting for Transport.identity...", RNS.LOG_INFO)
+
+        # Protocol v2: Wait for Transport.identity BEFORE starting GATT server
+        # This ensures the Identity characteristic is created with a valid value,
+        # preventing BlueZ from rejecting/corrupting the advertisement
+        if self.gatt_server:
+            identity_hash = self._wait_for_transport_identity(timeout=10)
+            if identity_hash:
+                self.gatt_server.set_transport_identity(identity_hash)
+                RNS.log(f"{self} Transport.identity set on GATT server: {identity_hash.hex()}", RNS.LOG_INFO)
+            else:
+                RNS.log(f"{self} WARNING: Starting GATT server without identity (Protocol v1 mode)", RNS.LOG_WARNING)
+
+            # Start GATT server AFTER identity is set
+            asyncio.run_coroutine_threadsafe(self._start_server(), self.loop)
+
         RNS.log(f"{self} started successfully", RNS.LOG_INFO)
 
     def _run_async_loop(self):
