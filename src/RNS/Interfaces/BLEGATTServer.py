@@ -399,7 +399,10 @@ class BLEGATTServer:
                 flags=['read'],
                 read_callback=self._handle_read_identity
             )
-            self._log(f"Added Identity characteristic: {self.IDENTITY_CHAR_UUID} (READ) - Protocol v2", level="DEBUG")
+            if identity_value:
+                self._log(f"Added Identity characteristic: {self.IDENTITY_CHAR_UUID} (READ) with {len(identity_value)} bytes - Protocol v2", level="DEBUG")
+            else:
+                self._log(f"Added Identity characteristic: {self.IDENTITY_CHAR_UUID} (READ) with EMPTY value - will be updated when identity loads", level="WARNING")
 
             # Find and save TX characteristic for later notification sends
             # Characteristics are stored in order added: chr_id=1 (RX) is index 0, chr_id=2 (TX) is index 1

@@ -488,6 +488,18 @@ class BLEInterface(Interface):
         else:
             RNS.log(f"{self} central mode disabled, skipping peer discovery", RNS.LOG_INFO)
 
+        # Protocol v2: Wait for Transport.identity BEFORE starting GATT server
+        # This ensures the Identity characteristic is created with a valid value,
+        # preventing BlueZ from rejecting/corrupting the advertisement
+        if self.gatt_server:
+            RNS.log(f"{self} Waiting for Transport.identity before starting GATT server...", RNS.LOG_DEBUG)
+            identity_hash = self._wait_for_transport_identity(timeout=30)
+            if identity_hash:
+                self.gatt_server.set_transport_identity(identity_hash)
+                RNS.log(f"{self} Transport.identity set on GATT server: {identity_hash.hex()}", RNS.LOG_INFO)
+            else:
+                RNS.log(f"{self} WARNING: Starting GATT server without identity (Protocol v1 mode)", RNS.LOG_WARNING)
+
         # Start GATT server if peripheral mode is enabled
         if self.gatt_server:
             asyncio.run_coroutine_threadsafe(self._start_server(), self.loop)
@@ -505,60 +517,55 @@ class BLEInterface(Interface):
         self.online = True
         RNS.log(f"{self} started successfully", RNS.LOG_INFO)
 
-        # Protocol v2: Load Transport identity asynchronously after startup
-        # Transport.identity is loaded AFTER interface initialization, so we need to wait for it
-        if self.gatt_server:
-            RNS.log(f"{self} Launching deferred Transport.identity loading task", RNS.LOG_DEBUG)
-            asyncio.run_coroutine_threadsafe(self._load_identity_when_ready(), self.loop)
-
     def _run_async_loop(self):
         """Run the asyncio event loop in a separate thread."""
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
         self.loop.run_forever()
 
-    async def _load_identity_when_ready(self):
+    def _wait_for_transport_identity(self, timeout=30):
         """
-        Wait for Transport.identity to be loaded, then set it on the GATT server.
+        Synchronously wait for Transport.identity to be loaded.
 
-        Transport.identity is loaded from storage AFTER interface initialization,
-        so we need to poll until it becomes available. This is called as a background
-        task during interface startup.
+        Called during interface startup BEFORE GATT server starts to ensure
+        the Identity characteristic can be created with a valid value.
 
-        Retries every 1 second for up to 30 seconds.
+        Uses polling with small delays to avoid blocking too long.
+
+        Args:
+            timeout: Maximum seconds to wait for identity
+
+        Returns:
+            16-byte identity hash or None if timeout/unavailable
         """
-        max_attempts = 30
-        retry_interval = 1.0  # seconds
+        import RNS.Transport as Transport
 
-        for attempt in range(1, max_attempts + 1):
+        start_time = time.time()
+        attempt = 0
+
+        while time.time() - start_time < timeout:
+            attempt += 1
+
             try:
-                import RNS.Transport as Transport
-
                 if hasattr(Transport, 'identity') and Transport.identity:
                     identity_hash = Transport.identity.hash
-
                     if identity_hash and len(identity_hash) == 16:
-                        # Success! Set identity on GATT server
-                        self.gatt_server.set_transport_identity(identity_hash)
-                        RNS.log(f"{self} ✓ Transport.identity loaded on attempt {attempt}, set on GATT server: {identity_hash.hex()}", RNS.LOG_INFO)
-                        return
-                    else:
-                        RNS.log(f"{self} WARNING: Invalid Transport identity hash size: {len(identity_hash) if identity_hash else 0}", RNS.LOG_WARNING)
-                        return
-
-                # Not available yet, log and retry
-                if attempt == 1 or attempt % 5 == 0 or attempt == max_attempts:
-                    # Log on first attempt, every 5th attempt, and last attempt
-                    RNS.log(f"{self} Waiting for Transport.identity to load... (attempt {attempt}/{max_attempts})", RNS.LOG_DEBUG)
-
+                        elapsed = time.time() - start_time
+                        RNS.log(f"{self} ✓ Transport.identity available after {elapsed:.1f}s (attempt {attempt})", RNS.LOG_INFO)
+                        return identity_hash
             except Exception as e:
-                RNS.log(f"{self} Error checking Transport.identity: {e}", RNS.LOG_WARNING)
+                if attempt == 1:
+                    RNS.log(f"{self} Error checking Transport.identity: {e}", RNS.LOG_DEBUG)
 
-            await asyncio.sleep(retry_interval)
+            # Log progress periodically
+            if attempt == 1 or attempt % 10 == 0:
+                RNS.log(f"{self} Waiting for Transport.identity... (attempt {attempt}, {time.time() - start_time:.1f}s)", RNS.LOG_DEBUG)
 
-        # Timeout - identity never became available
-        RNS.log(f"{self} WARNING: Transport.identity not available after {max_attempts}s - GATT server will serve empty identity", RNS.LOG_WARNING)
-        RNS.log(f"{self} Protocol v2 disabled - falling back to MAC-based peer tracking", RNS.LOG_WARNING)
+            time.sleep(0.1)  # Poll every 100ms
+
+        # Timeout
+        RNS.log(f"{self} WARNING: Transport.identity not available after {timeout}s", RNS.LOG_WARNING)
+        return None
 
     def _clear_stale_ble_paths(self):
         """
