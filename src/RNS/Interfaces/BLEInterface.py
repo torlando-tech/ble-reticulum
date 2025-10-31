@@ -1484,13 +1484,15 @@ class BLEInterface(Interface):
                         RNS.log(f"{self} failed to read identity from {peer.name}: {type(e).__name__}: {e}", RNS.LOG_DEBUG)
                         # Continue without identity
 
-                # Send connection handshake to trigger peripheral callback
-                # Write empty bytes to RX characteristic to ensure remote's on_central_connected fires
-                # This guarantees bidirectional peer interface spawning even when only one side discovers
-                # TODO: Consider sending handshake packet with protocol version/capabilities/flags
+                # Send connection handshake WITH our identity to trigger peripheral callback
+                # This enables the peripheral to create a unified interface with our identity
+                # without needing to discover us via scanning (solves asymmetric discovery issue)
                 try:
-                    await client.write_gatt_char(self.CHARACTERISTIC_RX_UUID, b'', response=True)
-                    RNS.log(f"{self} sent connection handshake to {peer.name}", RNS.LOG_DEBUG)
+                    # Get our own identity to send in handshake
+                    our_identity = self.gatt_server.identity_hash if (self.gatt_server and self.gatt_server.identity_hash) else b'\x00' * 16
+                    await client.write_gatt_char(self.CHARACTERISTIC_RX_UUID, our_identity, response=True)
+                    identity_preview = our_identity[:8].hex() if len(our_identity) >= 8 else "null"
+                    RNS.log(f"{self} sent connection handshake WITH identity to {peer.name} ({len(our_identity)} bytes, {identity_preview}...)", RNS.LOG_DEBUG)
                 except Exception as e:
                     RNS.log(f"{self} handshake write failed (non-critical): {e}", RNS.LOG_WARNING)
 
@@ -1788,8 +1790,56 @@ class BLEInterface(Interface):
         """
         RNS.log(f"{self} received {len(data)} bytes from central {sender_address}", RNS.LOG_EXTREME)
 
-        # NOTE: Interface creation is handled by handle_central_connected() callback
-        # which is called when the central first connects (via handshake write)
+        # Detect identity handshake (16 bytes, likely the first write from this peer)
+        # The central sends its own identity in the handshake to enable unified interface creation
+        # even when the peripheral hasn't discovered the central via scanning
+        if len(data) == 16:
+            central_identity = bytes(data)
+            central_identity_hash = RNS.Identity.full_hash(central_identity)[:16].hex()[:16]
+
+            # Store or verify identity mapping
+            if sender_address not in self.address_to_identity:
+                # First time seeing this identity for this address
+                self.address_to_identity[sender_address] = central_identity
+                self.identity_to_address[central_identity_hash] = sender_address
+                RNS.log(f"{self} received identity handshake from {sender_address}: {central_identity_hash}", RNS.LOG_INFO)
+            else:
+                # Already know identity - verify it matches
+                existing_identity = self.address_to_identity[sender_address]
+                if existing_identity == central_identity:
+                    RNS.log(f"{self} received identity handshake confirmation from {sender_address}: {central_identity_hash}", RNS.LOG_DEBUG)
+                else:
+                    RNS.log(f"{self} WARNING: identity mismatch for {sender_address}! Existing vs received", RNS.LOG_WARNING)
+
+            # Check if we need to merge interfaces
+            legacy_conn_id = f"{sender_address}-peripheral"
+            if legacy_conn_id in self.spawned_interfaces:
+                # Legacy peripheral interface exists - need to migrate or merge
+                if central_identity_hash in self.spawned_interfaces:
+                    # We already have an identity-based interface (from central connection)
+                    # Add peripheral connection to it and remove legacy interface
+                    identity_if = self.spawned_interfaces[central_identity_hash]
+                    legacy_if = self.spawned_interfaces[legacy_conn_id]
+
+                    # Add peripheral connection to unified interface
+                    identity_if.add_peripheral_connection()
+
+                    # Clean up legacy interface
+                    legacy_if.detach()
+                    del self.spawned_interfaces[legacy_conn_id]
+
+                    RNS.log(f"{self} merged legacy peripheral into identity-based interface {central_identity_hash} (now {identity_if._get_connection_state_str()})", RNS.LOG_INFO)
+                else:
+                    # No identity-based interface yet - migrate the legacy one
+                    legacy_if = self.spawned_interfaces[legacy_conn_id]
+                    del self.spawned_interfaces[legacy_conn_id]
+
+                    legacy_if.peer_identity = central_identity
+                    self.spawned_interfaces[central_identity_hash] = legacy_if
+
+                    RNS.log(f"{self} migrated interface from legacy ({legacy_conn_id}) to identity-based ({central_identity_hash})", RNS.LOG_INFO)
+
+            return  # Don't process handshake as data
 
         # Update fragmenter MTU if GATT server has learned a new MTU
         # (MTU is provided by BlueZ in write callback options)
