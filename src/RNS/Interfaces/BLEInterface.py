@@ -502,30 +502,63 @@ class BLEInterface(Interface):
         # TODO: Remove when upstream Transport.py is fixed (see session notes)
         self._clear_stale_ble_paths()
 
-        # Protocol v2: Set Transport identity on GATT server for stable peer tracking
-        if self.gatt_server:
-            try:
-                import RNS.Transport as Transport
-                if hasattr(Transport, 'identity') and Transport.identity:
-                    identity_hash = Transport.identity.hash
-                    if identity_hash and len(identity_hash) == 16:
-                        self.gatt_server.set_transport_identity(identity_hash)
-                        RNS.log(f"{self} Set Transport identity on GATT server: {identity_hash.hex()}", RNS.LOG_INFO)
-                    else:
-                        RNS.log(f"{self} WARNING: Invalid Transport identity hash size: {len(identity_hash) if identity_hash else 0}", RNS.LOG_WARNING)
-                else:
-                    RNS.log(f"{self} WARNING: Transport.identity not available yet", RNS.LOG_WARNING)
-            except Exception as e:
-                RNS.log(f"{self} Error setting Transport identity: {e}", RNS.LOG_ERROR)
-
         self.online = True
         RNS.log(f"{self} started successfully", RNS.LOG_INFO)
+
+        # Protocol v2: Load Transport identity asynchronously after startup
+        # Transport.identity is loaded AFTER interface initialization, so we need to wait for it
+        if self.gatt_server:
+            RNS.log(f"{self} Launching deferred Transport.identity loading task", RNS.LOG_DEBUG)
+            asyncio.run_coroutine_threadsafe(self._load_identity_when_ready(), self.loop)
 
     def _run_async_loop(self):
         """Run the asyncio event loop in a separate thread."""
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
         self.loop.run_forever()
+
+    async def _load_identity_when_ready(self):
+        """
+        Wait for Transport.identity to be loaded, then set it on the GATT server.
+
+        Transport.identity is loaded from storage AFTER interface initialization,
+        so we need to poll until it becomes available. This is called as a background
+        task during interface startup.
+
+        Retries every 1 second for up to 30 seconds.
+        """
+        max_attempts = 30
+        retry_interval = 1.0  # seconds
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                import RNS.Transport as Transport
+
+                if hasattr(Transport, 'identity') and Transport.identity:
+                    identity_hash = Transport.identity.hash
+
+                    if identity_hash and len(identity_hash) == 16:
+                        # Success! Set identity on GATT server
+                        self.gatt_server.set_transport_identity(identity_hash)
+                        RNS.log(f"{self} ✓ Transport.identity loaded on attempt {attempt}, set on GATT server: {identity_hash.hex()}", RNS.LOG_INFO)
+                        return
+                    else:
+                        RNS.log(f"{self} WARNING: Invalid Transport identity hash size: {len(identity_hash) if identity_hash else 0}", RNS.LOG_WARNING)
+                        return
+
+                # Not available yet, log and retry
+                if attempt == 1 or attempt % 5 == 0 or attempt == max_attempts:
+                    # Log on first attempt, every 5th attempt, and last attempt
+                    RNS.log(f"{self} Waiting for Transport.identity to load... (attempt {attempt}/{max_attempts})", RNS.LOG_DEBUG)
+
+            except Exception as e:
+                RNS.log(f"{self} Error checking Transport.identity: {e}", RNS.LOG_WARNING)
+
+            await asyncio.sleep(retry_interval)
+
+        # Timeout - identity never became available
+        RNS.log(f"{self} WARNING: Transport.identity not available after {max_attempts}s - GATT server will serve empty identity", RNS.LOG_WARNING)
+        RNS.log(f"{self} Protocol v2 disabled - falling back to MAC-based peer tracking", RNS.LOG_WARNING)
 
     def _clear_stale_ble_paths(self):
         """
