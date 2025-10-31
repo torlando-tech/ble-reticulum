@@ -1445,6 +1445,16 @@ class BLEInterface(Interface):
                         RNS.log(f"{self} failed to read identity from {peer.name}: {type(e).__name__}: {e}", RNS.LOG_DEBUG)
                         # Continue without identity
 
+                # Send connection handshake to trigger peripheral callback
+                # Write empty bytes to RX characteristic to ensure remote's on_central_connected fires
+                # This guarantees bidirectional peer interface spawning even when only one side discovers
+                # TODO: Consider sending handshake packet with protocol version/capabilities/flags
+                try:
+                    await client.write_gatt_char(self.CHARACTERISTIC_RX_UUID, b'', response=True)
+                    RNS.log(f"{self} sent connection handshake to {peer.name}", RNS.LOG_DEBUG)
+                except Exception as e:
+                    RNS.log(f"{self} handshake write failed (non-critical): {e}", RNS.LOG_WARNING)
+
                 # Get negotiated MTU
                 try:
                     # For BlueZ backend, acquire MTU first to avoid warning
