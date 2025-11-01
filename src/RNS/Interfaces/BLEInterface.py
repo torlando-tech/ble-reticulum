@@ -1863,6 +1863,19 @@ class BLEInterface(Interface):
 
                     RNS.log(f"{self} migrated interface from legacy ({legacy_conn_id}) to identity-based ({central_identity_hash})", RNS.LOG_INFO)
 
+            # Create fragmenter/reassembler for peripheral connection to enable bidirectional data flow
+            # This is critical: fragmenters must exist for BOTH central and peripheral connections
+            frag_key = self._get_fragmenter_key(central_identity, sender_address)
+            with self.frag_lock:
+                if frag_key not in self.fragmenters:
+                    # Get MTU from GATT server for this peripheral connection
+                    mtu = self.gatt_server.get_central_mtu(sender_address) if self.gatt_server else 23
+                    self.fragmenters[frag_key] = BLEFragmenter(mtu=mtu)
+                    self.reassemblers[frag_key] = BLEReassembler(timeout=self.connection_timeout)
+                    RNS.log(f"{self} created fragmenter for peripheral connection (key: {frag_key[:16]}, MTU: {mtu})", RNS.LOG_DEBUG)
+                else:
+                    RNS.log(f"{self} fragmenter already exists for peripheral connection (key: {frag_key[:16]})", RNS.LOG_EXTREME)
+
             return  # Don't process handshake as data
 
         # Update fragmenter MTU if GATT server has learned a new MTU
