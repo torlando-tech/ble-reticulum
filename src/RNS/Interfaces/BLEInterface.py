@@ -348,7 +348,10 @@ class BLEInterface(Interface):
 
         # BLE configuration
         self.service_uuid = c.get("service_uuid", BLEInterface.SERVICE_UUID)
-        self.device_name = c.get("device_name", f"Reticulum-{RNS.Identity.full_hash(self.name.encode())[:4].hex()}")
+        # Device name will be set to identity-based name after Transport.identity is available
+        # Format: RNS-{identity_hash} where identity_hash is first 16 hex chars of Transport.identity
+        # This enables reliable discovery even when bluezero doesn't expose service UUIDs to Bleak
+        self.device_name = c.get("device_name", None)  # Will be auto-generated from identity if None
         self.discovery_interval = float(c.get("discovery_interval", BLEInterface.DISCOVERY_INTERVAL))
         self.max_peers = int(c.get("max_connections", BLEInterface.MAX_PEERS))
         self.min_rssi = int(c.get("min_rssi", BLEInterface.MIN_RSSI))
@@ -542,12 +545,27 @@ class BLEInterface(Interface):
                         elapsed = time.time() - start_time
                         RNS.log(f"{self} ✓ Transport.identity available after {elapsed:.1f}s", RNS.LOG_INFO)
 
+                        # Generate identity-based device name if not configured
+                        # Protocol v2.1: Encode full identity.hash (16 bytes) in BLE device name for reliable discovery
+                        # This bypasses bluezero service_uuid exposure bug (service_uuids=[] in Bleak scans)
+                        # Format: RNS-{32-hex-chars} = RNS-{16-byte-identity-hex} (36 chars, fits in 248-byte BLE name limit)
+                        if self.device_name is None:
+                            identity_str = identity_hash.hex()  # Full 16 bytes as 32 hex chars
+                            self.device_name = f"RNS-{identity_str}"
+                            RNS.log(f"{self} Auto-generated identity-based device name: {self.device_name}", RNS.LOG_INFO)
+                        else:
+                            RNS.log(f"{self} Using configured device name: {self.device_name}", RNS.LOG_INFO)
+
                         # Set identity on GATT server
                         self.gatt_server.set_transport_identity(identity_hash)
                         RNS.log(f"{self} Transport.identity set on GATT server: {identity_hash.hex()}", RNS.LOG_INFO)
 
+                        # Update GATT server's device_name to use identity-based name
+                        self.gatt_server.device_name = self.device_name
+                        RNS.log(f"{self} GATT server will advertise as: {self.device_name}", RNS.LOG_INFO)
+
                         # Start GATT server with valid identity
-                        RNS.log(f"{self} Starting GATT server with Protocol v2 identity...", RNS.LOG_INFO)
+                        RNS.log(f"{self} Starting GATT server with Protocol v2.1 (identity-based naming)...", RNS.LOG_INFO)
                         asyncio.run_coroutine_threadsafe(self._start_server(), self.loop)
                         return
             except Exception as e:
@@ -966,8 +984,9 @@ class BLEInterface(Interface):
                     match_method = "service UUID"
 
                 # Fallback: Match by device name pattern
-                # This handles cases where bluezero/BlueZ don't include service UUID in advertisement
-                # Common reasons: advertisement packet size limit (31 bytes), BlueZ configuration
+                # Protocol v2.1: Extract identity from device name (format: RNS-{16-char-hex-hash})
+                # This bypasses bluezero service_uuid bug where service_uuids=[] in Bleak scans
+                # Also handles Protocol v1 devices with generic RNS- names
                 elif device.name and device.name.startswith("RNS-"):
                     # Ensure it's not our own device (self-filtering)
                     if device.name != self.device_name:
@@ -979,6 +998,24 @@ class BLEInterface(Interface):
                     matching_peers += 1
                     rssi = adv_data.rssi
                     device_name = device.name or f"BLE-{device.address[-8:]}"
+
+                    # Protocol v2.1: Try to parse identity from device name (format: RNS-{32-hex-chars})
+                    # This bypasses the need to read Identity characteristic over GATT
+                    peer_identity_from_name = None
+                    if device.name and match_method == "name pattern (fallback)":
+                        import re
+                        identity_pattern = r'^RNS-([0-9a-f]{32})$'  # 32 hex chars = 16 bytes
+                        name_match = re.match(identity_pattern, device.name)
+                        if name_match:
+                            try:
+                                # Parse full 16-byte identity.hash from device name
+                                identity_hex = name_match.group(1)
+                                peer_identity_from_name = bytes.fromhex(identity_hex)  # 16 bytes
+                                self.address_to_identity[device.address] = peer_identity_from_name
+                                self.identity_to_address[identity_hex[:16]] = device.address  # Store mapping
+                                RNS.log(f"{self} parsed identity from device name {device.name}: {identity_hex[:16]}...", RNS.LOG_INFO)
+                            except (ValueError, IndexError) as e:
+                                RNS.log(f"{self} failed to parse identity from name {device.name}: {e}", RNS.LOG_DEBUG)
 
                     # Log all matching peers at DEBUG level for visibility
                     RNS.log(f"{self} found matching peer {device_name} ({device.address}) via {match_method}, "
