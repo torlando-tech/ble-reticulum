@@ -1517,9 +1517,12 @@ class BLEInterface(Interface):
                     self.peers[peer.address] = (client, time.time(), mtu)
 
                 # Create fragmenter for this peer's MTU
+                # KEY CHANGE: Use identity_hash for keying (survives MAC rotation, fixes dev: prefix issue)
+                frag_key = self._get_fragmenter_key(peer_identity, peer.address)
                 with self.frag_lock:
-                    self.fragmenters[peer.address] = BLEFragmenter(mtu=mtu)
-                    self.reassemblers[peer.address] = BLEReassembler(timeout=self.connection_timeout)
+                    self.fragmenters[frag_key] = BLEFragmenter(mtu=mtu)
+                    self.reassemblers[frag_key] = BLEReassembler(timeout=self.connection_timeout)
+                RNS.log(f"{self} created fragmenter/reassembler for peer (key: {frag_key[:16]})", RNS.LOG_DEBUG)
 
                 # Create or update unified peer interface with central connection
                 self._spawn_or_update_peer_interface(
@@ -1632,6 +1635,27 @@ class BLEInterface(Interface):
                 # Standard error logging
                 RNS.log(f"{self} failed to connect to {peer.name} ({peer.address}): "
                         f"{error_type}: {e}, failures={peer.failed_connections}", RNS.LOG_WARNING)
+
+    def _get_fragmenter_key(self, peer_identity, peer_address):
+        """
+        Compute fragmenter/reassembler dictionary key.
+
+        Uses identity_hash for Protocol v2 devices (survives MAC rotation),
+        falls back to normalized MAC for Protocol v1 legacy devices.
+
+        Args:
+            peer_identity: 16-byte peer identity (None for Protocol v1)
+            peer_address: BLE MAC address (may have "dev:" prefix)
+
+        Returns:
+            str: Identity hash (16 hex chars) or normalized MAC address
+        """
+        if peer_identity:
+            # Protocol v2: Use identity hash (immune to MAC rotation)
+            return RNS.Identity.full_hash(peer_identity)[:16].hex()[:16]
+        else:
+            # Protocol v1 fallback: Use normalized MAC address
+            return peer_address.replace("dev:", "")
 
     def _spawn_or_update_peer_interface(self, address, name, peer_identity=None, client=None, mtu=None, connection_type="central"):
         """
@@ -2314,13 +2338,15 @@ class BLEPeerInterface(Interface):
         # Log packet transmission
         RNS.log(f"{self} TX: {len(data)} bytes to {self.peer_name}", RNS.LOG_DEBUG)
 
-        # Get fragmenter for this peer
+        # Get fragmenter for this peer (using identity-based key for MAC rotation immunity)
+        frag_key = self.parent_interface._get_fragmenter_key(self.peer_identity, self.peer_address)
+
         with self.parent_interface.frag_lock:
-            if self.peer_address not in self.parent_interface.fragmenters:
-                RNS.log(f"No fragmenter for peer {self.peer_address}", RNS.LOG_WARNING)
+            if frag_key not in self.parent_interface.fragmenters:
+                RNS.log(f"No fragmenter for peer {self.peer_name} (key: {frag_key})", RNS.LOG_WARNING)
                 return
 
-            fragmenter = self.parent_interface.fragmenters[self.peer_address]
+            fragmenter = self.parent_interface.fragmenters[frag_key]
 
         # Fragment the data
         try:
