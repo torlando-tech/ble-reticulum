@@ -924,9 +924,9 @@ class BLEInterface(Interface):
             def detection_callback(device, advertisement_data):
                 """Callback invoked for each discovered BLE device."""
                 # Debug: Log ALL devices to diagnose why matching fails
-                # RNS.log(f"{self} DEBUG: Device {device.address} name={device.name} "
-                #         f"service_uuids={advertisement_data.service_uuids} "
-                #         f"local_name={advertisement_data.local_name}", RNS.LOG_DEBUG)
+                RNS.log(f"{self} scanned device: {device.address} name={device.name} "
+                        f"service_uuids={advertisement_data.service_uuids} "
+                        f"rssi={advertisement_data.rssi}dBm", RNS.LOG_EXTREME)
                 discovered_devices.append((device, advertisement_data))
 
             # Scan duration based on power mode
@@ -1013,6 +1013,17 @@ class BLEInterface(Interface):
                         matched = True
                         match_method = "name pattern (fallback)"
                         RNS.log(f"{self} ⚠ Matched {device.name} by name pattern (fallback)", RNS.LOG_DEBUG)
+                    else:
+                        # Log when we skip our own device
+                        RNS.log(f"{self} skipping own device {device.name} (self-filter)", RNS.LOG_EXTREME)
+                else:
+                    # Log when device doesn't match either method
+                    if device.name:
+                        RNS.log(f"{self} device {device.name} ({device.address}) doesn't match: "
+                                f"service_uuid={self.service_uuid in adv_data.service_uuids}, "
+                                f"name_pattern={device.name.startswith('RNS-')}", RNS.LOG_EXTREME)
+                    else:
+                        RNS.log(f"{self} device {device.address} has no name, skipping", RNS.LOG_EXTREME)
 
                 if matched:
                     matching_peers += 1
@@ -1059,7 +1070,7 @@ class BLEInterface(Interface):
                         RNS.log(f"{self} rejecting weak peer {device_name} ({device.address}) "
                                 f"RSSI: {rssi}dBm < min_rssi: {self.min_rssi}dBm", RNS.LOG_DEBUG)
 
-            RNS.log(f"{self} scan complete: {len(discovered_devices)} total devices, {matching_peers} matching service UUID, "
+            RNS.log(f"{self} scan complete: {len(discovered_devices)} total devices, {matching_peers} matching peers (service UUID or name), "
                     f"{len(self.discovered_peers)} total discovered, {len(self.peers)} connected", RNS.LOG_DEBUG)
 
             # After discovery, select and connect to best peers
