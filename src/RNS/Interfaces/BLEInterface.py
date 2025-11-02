@@ -1511,6 +1511,10 @@ class BLEInterface(Interface):
 
                     RNS.log(f"{self} service discovery completed in {discovery_time:.3f}s, found {len(services)} services", RNS.LOG_DEBUG)
 
+                    # Debug: Log all discovered service UUIDs to diagnose service discovery issues
+                    for svc in services:
+                        RNS.log(f"{self}   - Discovered service UUID: {svc.uuid}", RNS.LOG_DEBUG)
+
                     # Find Reticulum service
                     reticulum_service = None
                     for svc in services:
@@ -1527,6 +1531,17 @@ class BLEInterface(Interface):
 
                 except Exception as e:
                     RNS.log(f"{self} service discovery failed: {type(e).__name__}: {e} (will retry)", RNS.LOG_WARNING)
+
+                # Guard: Fail early if Reticulum service wasn't found
+                # This prevents TypeError when trying to create fragmenters with peer_identity=None
+                if not reticulum_service:
+                    RNS.log(f"{self} cannot proceed without Reticulum service, disconnecting from {peer.name}", RNS.LOG_ERROR)
+                    try:
+                        await client.disconnect()
+                    except Exception as e:
+                        RNS.log(f"{self} error during disconnect: {e}", RNS.LOG_DEBUG)
+                    self._record_connection_failure(peer.address)
+                    return
 
                 # Read Identity characteristic (Protocol v2) if available
                 peer_identity = None
@@ -1578,6 +1593,20 @@ class BLEInterface(Interface):
 
                 with self.peer_lock:
                     self.peers[peer.address] = (client, time.time(), mtu)
+
+                # Belt-and-suspenders: Ensure peer_identity is available before creating fragmenters
+                # This should not normally happen due to early return guard above, but protects
+                # against edge cases where identity characteristic exists but couldn't be read
+                if not peer_identity:
+                    RNS.log(f"{self} no peer identity available for {peer.name}, cannot create fragmenter", RNS.LOG_ERROR)
+                    try:
+                        await client.disconnect()
+                    except Exception as e:
+                        RNS.log(f"{self} error during disconnect: {e}", RNS.LOG_DEBUG)
+                    with self.peer_lock:
+                        del self.peers[peer.address]
+                    self._record_connection_failure(peer.address)
+                    return
 
                 # Create fragmenter for this peer's MTU
                 # KEY CHANGE: Use identity_hash for keying (survives MAC rotation, fixes dev: prefix issue)
