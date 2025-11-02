@@ -1576,16 +1576,37 @@ class BLEInterface(Interface):
 
                 # Get negotiated MTU
                 try:
-                    # For BlueZ backend, acquire MTU first to avoid warning
-                    # This queries D-Bus for the actual negotiated MTU value
-                    if hasattr(client, '_backend') and hasattr(client._backend, '_acquire_mtu'):
+                    mtu = None
+
+                    # Method 1: Try direct MTU property access (BlueZ 5.62+)
+                    # This avoids the permission issues with _acquire_mtu()
+                    if hasattr(client, '_backend') and hasattr(client, 'services') and client.services:
+                        try:
+                            # Access characteristics from the BlueZ backend
+                            for char in client.services.characteristics.values():
+                                # In BlueZ backend, characteristic has 'obj' tuple: (path, properties_dict)
+                                if hasattr(char, 'obj') and len(char.obj) > 1:
+                                    char_props = char.obj[1]
+                                    if isinstance(char_props, dict) and "MTU" in char_props:
+                                        mtu = char_props["MTU"]
+                                        RNS.log(f"{self} read MTU {mtu} from characteristic property for {peer.name}", RNS.LOG_DEBUG)
+                                        break
+                        except Exception as e:
+                            RNS.log(f"{self} could not read MTU from characteristic properties: {type(e).__name__}: {e}", RNS.LOG_EXTREME)
+
+                    # Method 2: Try _acquire_mtu() for older BlueZ versions or other backends
+                    if mtu is None and hasattr(client, '_backend') and hasattr(client._backend, '_acquire_mtu'):
                         try:
                             await client._backend._acquire_mtu()
-                            RNS.log(f"{self} acquired MTU from BlueZ D-Bus for {peer.name}", RNS.LOG_EXTREME)
+                            mtu = client.mtu_size
+                            RNS.log(f"{self} acquired MTU via _acquire_mtu() for {peer.name}", RNS.LOG_EXTREME)
                         except Exception as e:
-                            RNS.log(f"{self} failed to acquire MTU via D-Bus: {e}, will use default", RNS.LOG_DEBUG)
+                            RNS.log(f"{self} failed to acquire MTU via _acquire_mtu(): {e}", RNS.LOG_EXTREME)
 
-                    mtu = client.mtu_size
+                    # Method 3: Fallback to client.mtu_size (may trigger warning but will work)
+                    if mtu is None:
+                        mtu = client.mtu_size
+
                     RNS.log(f"{self} negotiated MTU {mtu} with {peer.name}", RNS.LOG_DEBUG)
                 except Exception as e:
                     RNS.log(f"{self} could not get MTU from {peer.name}, using default 23: {type(e).__name__}: {e}", RNS.LOG_WARNING)
