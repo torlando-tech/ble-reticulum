@@ -1827,6 +1827,17 @@ class BLEInterface(Interface):
             peer_address: Address of peer that sent data
             data: Raw bytes received (might be fragment)
         """
+        RNS.log(f"{self} received {len(data)} bytes from peer {peer_address}", RNS.LOG_EXTREME)
+
+        # Look up peer identity to compute fragmenter key
+        peer_identity = self.address_to_identity.get(peer_address)
+        if not peer_identity:
+            RNS.log(f"{self} no identity for peer {peer_address}, dropping data", RNS.LOG_WARNING)
+            return
+
+        # Compute identity-based fragmenter key (matches peripheral data handler)
+        frag_key = self._get_fragmenter_key(peer_identity, peer_address)
+
         # Attempt reassembly
         complete_packet = None
         peer_name = None
@@ -1834,9 +1845,10 @@ class BLEInterface(Interface):
         # HIGH #2: Lock ordering - get reassembler reference with frag_lock, release before processing
         # This prevents holding frag_lock during reassembly which could block other threads
         with self.frag_lock:
-            if peer_address not in self.reassemblers:
-                return  # No reassembler for this peer
-            reassembler = self.reassemblers[peer_address]
+            if frag_key not in self.reassemblers:
+                RNS.log(f"{self} no reassembler for {peer_address} (key: {frag_key[:16]}), dropping data", RNS.LOG_WARNING)
+                return
+            reassembler = self.reassemblers[frag_key]
 
         # Process fragment without holding lock (reassemblers are per-peer, no contention)
         try:
