@@ -1690,6 +1690,25 @@ class BLEInterface(Interface):
                     self._record_connection_failure(peer.address)
                     return
 
+                # Send identity handshake to peripheral
+                # This allows the peripheral to learn our identity without having to discover us via scanning
+                # Protocol: Central sends exactly 16 bytes (its identity hash) as first packet
+                try:
+                    our_identity = self.gatt_server.identity_hash if (self.gatt_server and self.gatt_server.identity_hash) else None
+                    if our_identity and len(our_identity) == 16:
+                        RNS.log(f"{self} sending identity handshake to {peer.name}...", RNS.LOG_DEBUG)
+                        await client.write_gatt_char(
+                            BLEInterface.CHARACTERISTIC_RX_UUID,
+                            our_identity,
+                            response=True
+                        )
+                        RNS.log(f"{self} sent identity handshake to {peer.name}", RNS.LOG_INFO)
+                    else:
+                        RNS.log(f"{self} skipping identity handshake (no identity available)", RNS.LOG_DEBUG)
+                except Exception as e:
+                    # Handshake failure is non-critical - peripheral can learn identity on next scan
+                    RNS.log(f"{self} failed to send identity handshake to {peer.name}: {type(e).__name__}: {e}", RNS.LOG_WARNING)
+
                 # Record success
                 self._record_connection_success(peer.address)
 
@@ -1881,9 +1900,49 @@ class BLEInterface(Interface):
         """
         RNS.log(f"{self} received {len(data)} bytes from central {sender_address}", RNS.LOG_EXTREME)
 
-        # Get peer identity (should be set by handle_central_connected)
+        # Check if we have peer identity
         peer_identity = self.address_to_identity.get(sender_address)
 
+        # Identity handshake detection: If no identity and exactly 16 bytes, treat as handshake
+        # Protocol: Central sends its 16-byte identity hash as first packet after connection
+        if not peer_identity and len(data) == 16:
+            try:
+                # Store central's identity
+                central_identity = bytes(data)
+                central_identity_hash = RNS.Identity.full_hash(central_identity)[:16].hex()[:16]
+
+                self.address_to_identity[sender_address] = central_identity
+                self.identity_to_address[central_identity_hash] = sender_address
+
+                RNS.log(f"{self} received identity handshake from central {sender_address}: {central_identity_hash}", RNS.LOG_INFO)
+                RNS.log(f"{self} stored identity mapping for {sender_address}", RNS.LOG_DEBUG)
+
+                # Create peer interface and fragmenter/reassembler now that we have identity
+                self._spawn_peer_interface(
+                    address=sender_address,
+                    name=f"Central-{sender_address[-8:]}",
+                    peer_identity=central_identity,
+                    client=None,  # No client for peripheral connections
+                    mtu=None,  # MTU managed by GATT server
+                    connection_type="peripheral"
+                )
+
+                # Create fragmenter/reassembler for this peer
+                frag_key = self._get_fragmenter_key(central_identity, sender_address)
+                with self.frag_lock:
+                    # Use default MTU for peripheral connections (GATT server manages MTU)
+                    # The actual MTU will be determined by the central device
+                    mtu = 23  # BLE 4.0 minimum MTU
+                    self.fragmenters[frag_key] = BLEFragmenter(mtu=mtu)
+                    self.reassemblers[frag_key] = BLEReassembler(timeout=self.connection_timeout)
+                RNS.log(f"{self} created fragmenter/reassembler for central (key: {frag_key[:16]})", RNS.LOG_DEBUG)
+
+                return  # Handshake processed, done
+            except Exception as e:
+                RNS.log(f"{self} failed to process identity handshake from {sender_address}: {type(e).__name__}: {e}", RNS.LOG_ERROR)
+                return
+
+        # If still no identity after handshake check, drop the data
         if not peer_identity:
             RNS.log(f"{self} no identity for central {sender_address}, dropping data", RNS.LOG_WARNING)
             return
@@ -1984,11 +2043,16 @@ class BLEInterface(Interface):
         """
         RNS.log(f"{self} central {address} connected to our peripheral", RNS.LOG_INFO)
 
-        # Look up peer identity (should exist from discovery or handshake)
+        # Look up peer identity
+        # Identity should be available via:
+        #   1. Discovery: If we previously scanned and discovered this central
+        #   2. Handshake: Central will send 16-byte identity as first write to RX characteristic
+        # At this point (connection established), we may not have identity yet - it arrives via handshake
         peer_identity = self.address_to_identity.get(address, None)
 
         if not peer_identity:
-            RNS.log(f"{self} cannot create interface for {address} - no identity available", RNS.LOG_ERROR)
+            RNS.log(f"{self} peer identity not yet available for {address} (will be provided via handshake)", RNS.LOG_DEBUG)
+            # Don't create interface yet - wait for identity handshake in handle_peripheral_data()
             return
 
         # Create peer interface with peripheral connection
