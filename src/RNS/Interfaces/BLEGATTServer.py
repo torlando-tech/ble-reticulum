@@ -153,10 +153,6 @@ class BLEGATTServer:
         Returns:
             value: Echo back the value (required by bluezero)
         """
-        # DIAGNOSTIC: Entry point for peripheral data reception
-        value_len = len(value) if hasattr(value, '__len__') else 'N/A'
-        self._log(f"_handle_write_rx ENTRY: value_len={value_len}, options_keys={list(options.keys())}", level="DEBUG")
-
         # Convert to bytes - ensure we always have bytes type
         if isinstance(value, list):
             data = bytes(value)
@@ -192,9 +188,7 @@ class BLEGATTServer:
                     self._log(f"Updated MTU for {central_address}: {old_mtu} -> {mtu}", level="DEBUG")
 
         # Pass data to callback for processing
-        # IMPORTANT: Ensure data is bytes before passing to reassembler
         if self.on_data_received:
-            self._log(f"DIAGNOSTIC: on_data_received callback EXISTS, preparing to call with {len(data)} bytes for {central_address}", level="DEBUG")
             try:
                 # Verify data is bytes before callback
                 if not isinstance(data, bytes):
@@ -202,15 +196,13 @@ class BLEGATTServer:
                     data = bytes(data)
 
                 # Call the callback (synchronous call - runs in bluezero thread)
-                self._log(f"DIAGNOSTIC: CALLING on_data_received({len(data)} bytes, {central_address})", level="DEBUG")
                 self.on_data_received(data, central_address)
-                self._log(f"DIAGNOSTIC: on_data_received RETURNED successfully", level="DEBUG")
             except Exception as e:
                 self._log(f"ERROR in data received callback: {type(e).__name__}: {e}", level="ERROR")
                 import traceback
                 self._log(f"Traceback: {traceback.format_exc()}", level="ERROR")
         else:
-            self._log(f"DIAGNOSTIC: on_data_received callback is NONE! Data LOST: {len(data)} bytes from {central_address}", level="ERROR")
+            self._log(f"on_data_received callback is NONE! Data LOST: {len(data)} bytes from {central_address}", level="ERROR")
 
         return value  # bluezero expects us to return the value
 
@@ -269,10 +261,6 @@ class BLEGATTServer:
         }
 
         self._log(f"Central connected: {central_address} (MTU: {effective_mtu})", level="INFO")
-
-        # DIAGNOSTIC: Check callback registration and invoke
-        callback_registered = self.on_central_connected is not None
-        self._log(f"on_central_connected callback: registered={callback_registered}", level="DEBUG")
 
         if self.on_central_connected:
             try:
@@ -383,7 +371,7 @@ class BLEGATTServer:
                 chr_id=2,
                 uuid=self.TX_CHAR_UUID,
                 value=[],
-                notifying=True,  # Enable notifications
+                notifying=True,
                 flags=['read', 'notify']
             )
             self._log(f"Added TX characteristic: {self.TX_CHAR_UUID} (READ, NOTIFY)", level="DEBUG")
