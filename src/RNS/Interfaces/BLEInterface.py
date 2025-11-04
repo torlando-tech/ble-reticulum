@@ -738,12 +738,85 @@ class BLEInterface(Interface):
                 connection_type=connection_type
             )
 
+    def _handle_identity_handshake(self, address: str, data: bytes) -> bool:
+        """
+        Handle identity handshake from central device (peripheral role only).
+
+        When a central connects to us (we're peripheral), it sends exactly 16 bytes
+        as the first packet - its identity hash. This allows the peripheral to learn
+        the central's identity without requiring discovery/scanning.
+
+        Args:
+            address: MAC address of the central device
+            data: Received data bytes
+
+        Returns:
+            True if data was handled as identity handshake, False otherwise
+        """
+        # Check if we already have peer identity
+        peer_identity = self.address_to_identity.get(address)
+        if peer_identity:
+            return False  # Already have identity, not a handshake
+
+        # Identity handshake detection: exactly 16 bytes, no existing identity
+        if len(data) != 16:
+            return False  # Not a handshake
+
+        try:
+            # Store central's identity
+            central_identity = bytes(data)
+            identity_hash = self._compute_identity_hash(central_identity)
+
+            self.address_to_identity[address] = central_identity
+            self.identity_to_address[identity_hash] = address
+
+            RNS.log(f"{self} received identity handshake from {address}: {identity_hash}", RNS.LOG_INFO)
+
+            # Get MTU for this connection (should be negotiated by now)
+            mtu = self.driver.get_peer_mtu(address)
+            if not mtu:
+                mtu = 23  # BLE 4.0 minimum MTU
+
+            # Create fragmenter/reassembler
+            frag_key = self._get_fragmenter_key(central_identity, address)
+
+            with self.frag_lock:
+                self.fragmenters[frag_key] = BLEFragmenter(mtu=mtu)
+                if frag_key not in self.reassemblers:
+                    self.reassemblers[frag_key] = BLEReassembler()
+
+            # Spawn peer interface if not already spawned
+            if identity_hash not in self.spawned_interfaces:
+                peer_name = f"Central-{address[-8:]}"
+                connection_type = "peripheral"  # We're the peripheral
+
+                self._spawn_peer_interface(
+                    address=address,
+                    name=peer_name,
+                    peer_identity=central_identity,
+                    mtu=mtu,
+                    connection_type=connection_type
+                )
+
+            RNS.log(f"{self} identity handshake complete for {address}", RNS.LOG_INFO)
+            return True  # Handshake processed successfully
+
+        except Exception as e:
+            RNS.log(f"{self} failed to process identity handshake from {address}: {e}", RNS.LOG_ERROR)
+            return True  # Still consumed the data, don't pass it on
+
     def _data_received_callback(self, address: str, data: bytes):
         """
         Driver callback: Handle received data from peer.
 
-        Passes data to reassembly and routing logic.
+        First checks for identity handshake (peripheral role), then passes
+        normal data to reassembly and routing logic.
         """
+        # Handle identity handshake if applicable
+        if self._handle_identity_handshake(address, data):
+            return  # Handshake handled, done
+
+        # Normal data processing
         self._handle_ble_data(address, data)
 
     def _device_disconnected_callback(self, address: str):
