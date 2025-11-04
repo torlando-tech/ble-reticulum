@@ -1079,6 +1079,13 @@ class LinuxBluetoothDriver(BLEDriverInterface):
         """Return local Bluetooth adapter MAC address."""
         return self.local_address or "00:00:00:00:00:00"
 
+    def get_peer_role(self, address: str) -> Optional[str]:
+        """Return the connection role ('central' or 'peripheral') for a peer."""
+        with self._peers_lock:
+            if address in self._peers:
+                return self._peers[address].connection_type
+            return None
+
     def set_service_discovery_delay(self, seconds: float):
         """Set delay between connection and service discovery."""
         self.service_discovery_delay = seconds
