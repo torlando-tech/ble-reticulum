@@ -429,6 +429,14 @@ class BLEInterface(Interface):
             RNS.log(f"{self} failed to start driver: {e}", RNS.LOG_ERROR)
             return
 
+        # If central mode is enabled, start scanning for peers
+        if self.enable_central:
+            try:
+                self.driver.start_scanning()
+                RNS.log(f"{self} started scanning for peers", RNS.LOG_INFO)
+            except Exception as e:
+                RNS.log(f"{self} failed to start scanning: {e}", RNS.LOG_ERROR)
+
 
         # Bug #13 workaround: Clear stale BLE paths from Transport.path_table
         # Reticulum core bug: Paths loaded from storage may have timestamp=0,
