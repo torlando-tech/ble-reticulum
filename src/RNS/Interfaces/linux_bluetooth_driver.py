@@ -1088,6 +1088,25 @@ class LinuxBluetoothDriver(BLEDriverInterface):
                 return self._peers[address].connection_type
             return None
 
+    def get_peer_mtu(self, address: str) -> Optional[int]:
+        """Return the negotiated MTU for a peer connection.
+
+        Checks both central connections (we connected to them) and peripheral
+        connections (they connected to us).
+        """
+        # Check central connections (we are central)
+        with self._peers_lock:
+            if address in self._peers:
+                return self._peers[address].mtu
+
+        # Check peripheral connections (we are peripheral, they are central)
+        if self.gatt_server:
+            with self.gatt_server.centrals_lock:
+                if address in self.gatt_server.connected_centrals:
+                    return self.gatt_server.connected_centrals[address].get("mtu")
+
+        return None
+
     def set_service_discovery_delay(self, seconds: float):
         """Set delay between connection and service discovery."""
         self.service_discovery_delay = seconds
