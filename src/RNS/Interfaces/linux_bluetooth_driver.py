@@ -1248,6 +1248,10 @@ class BluezeroGATTServer:
             self._log("Server already running", "WARNING")
             return
 
+        # Ensure identity is set before starting
+        if not self.identity_bytes:
+            raise RuntimeError("Identity must be set before starting GATT server. Call set_identity() first.")
+
         self._log(f"Starting GATT server with device name '{device_name}'...")
 
         # Reset events
@@ -1386,6 +1390,10 @@ class BluezeroGATTServer:
             )
             self.identity_characteristic = self.peripheral_obj.characteristics[-1]
             self._log(f"Added Identity characteristic: {self.identity_char_uuid}", "DEBUG")
+
+            # Set the identity value (guaranteed to be available by start() precondition)
+            self.identity_characteristic.set_value(list(self.identity_bytes))
+            self._log(f"Identity characteristic set to: {self.identity_bytes.hex()}")
 
             # Save TX characteristic reference
             if len(self.peripheral_obj.characteristics) >= 2:
