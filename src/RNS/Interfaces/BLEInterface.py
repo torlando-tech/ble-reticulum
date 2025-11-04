@@ -41,6 +41,7 @@ import threading
 import time
 import asyncio
 from collections import deque
+from typing import Optional
 
 # Add interface directory to path for importing other BLE modules
 # This is needed when loaded as external interface
@@ -647,54 +648,43 @@ class BLEInterface(Interface):
             except Exception as e:
                 RNS.log(f"{self} failed to initiate connection to {device.name}: {e}", RNS.LOG_ERROR)
 
-    def _device_connected_callback(self, address: str):
+    def _device_connected_callback(self, address: str, peer_identity: Optional[bytes]):
         """
         Driver callback: Handle successful device connection.
 
-        Called when driver has established a connection. We read the identity
-        characteristic and prepare to receive data.
+        Called when driver has established a connection. For central connections,
+        the peer_identity is provided. For peripheral connections, identity will
+        arrive later via handshake.
+
+        Args:
+            address: MAC address of connected peer
+            peer_identity: 16-byte identity hash (None for peripheral connections)
         """
-        # Check connection role to determine identity exchange method
         role = self.driver.get_peer_role(address)
 
-        if role == "central":
-            # We are the central, we must read the peer's identity
-            RNS.log(f"{self} connected to {address} as CENTRAL, reading identity...", RNS.LOG_INFO)
-            try:
-                identity_bytes = self.driver.read_characteristic(
-                    address,
-                    BLEInterface.CHARACTERISTIC_IDENTITY_UUID
-                )
+        if peer_identity is not None:
+            # Central mode: identity provided by driver
+            if len(peer_identity) == 16:
+                identity_hash = self._compute_identity_hash(peer_identity)
 
-                if identity_bytes and len(identity_bytes) == 16:
-                    peer_identity = bytes(identity_bytes)
-                    identity_hash = self._compute_identity_hash(peer_identity)
+                # Store identity mappings
+                self.address_to_identity[address] = peer_identity
+                self.identity_to_address[identity_hash] = address
 
-                    # Store identity mappings
-                    self.address_to_identity[address] = peer_identity
-                    self.identity_to_address[identity_hash] = address
-
-                    RNS.log(f"{self} received peer identity from {address}: {identity_hash}", RNS.LOG_INFO)
-                    self._record_connection_success(address)
-                else:
-                    RNS.log(f"{self} invalid identity from {address}, disconnecting", RNS.LOG_WARNING)
-                    self.driver.disconnect(address)
-                    self._record_connection_failure(address)
-
-            except Exception as e:
-                RNS.log(f"{self} failed to read identity from {address}: {e}", RNS.LOG_ERROR)
+                RNS.log(f"{self} connected to {address} as CENTRAL, received identity: {identity_hash}", RNS.LOG_INFO)
+                self._record_connection_success(address)
+            else:
+                RNS.log(f"{self} invalid identity from {address} (wrong length), disconnecting", RNS.LOG_WARNING)
                 self.driver.disconnect(address)
                 self._record_connection_failure(address)
 
         elif role == "peripheral":
-            # We are the peripheral, we must wait for the central to send its identity
+            # Peripheral mode: identity will arrive via handshake
             RNS.log(f"{self} connected to {address} as PERIPHERAL, waiting for identity handshake...", RNS.LOG_INFO)
-            # The identity will be received in `handle_peripheral_data` or `_data_received_callback`
-            # No action is needed here.
-            pass
+            # The identity will be received in `_data_received_callback`
 
         else:
-            RNS.log(f"{self} connected to {address}, but role is unknown. Disconnecting.", RNS.LOG_WARNING)
+            RNS.log(f"{self} connected to {address}, but identity not provided and role is {role}. Disconnecting.", RNS.LOG_WARNING)
             self.driver.disconnect(address)
 
     def _mtu_negotiated_callback(self, address: str, mtu: int):
