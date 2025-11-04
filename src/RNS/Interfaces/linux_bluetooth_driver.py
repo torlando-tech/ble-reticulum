@@ -1208,6 +1208,9 @@ class BluezeroGATTServer:
         self.tx_characteristic = None
         self.identity_characteristic = None
 
+        # State
+        self.running = False
+
         # Identity
         self.identity_bytes: Optional[bytes] = None
 
