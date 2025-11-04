@@ -254,6 +254,7 @@ class PeerConnection:
     mtu: int = 23  # Negotiated MTU
     connection_type: str = "unknown"  # "central" or "peripheral"
     connected_at: float = 0.0
+    peer_identity: Optional[bytes] = None  # 16-byte identity hash
 
 
 class LinuxBluetoothDriver(BLEDriverInterface):
@@ -822,7 +823,8 @@ class LinuxBluetoothDriver(BLEDriverInterface):
                 client=client,
                 mtu=mtu,
                 connection_type="central",
-                connected_at=time.time()
+                connected_at=time.time(),
+                peer_identity=peer_identity
             )
 
             with self._peers_lock:
@@ -846,10 +848,10 @@ class LinuxBluetoothDriver(BLEDriverInterface):
                 except Exception as e:
                     self._log(f"Failed to send identity handshake: {e}", "WARNING")
 
-            # Notify callback
+            # Notify callback with peer identity
             if self.on_device_connected:
                 try:
-                    self.on_device_connected(address)
+                    self.on_device_connected(address, peer_identity)
                 except Exception as e:
                     self._log(f"Error in device connected callback: {e}", "ERROR")
 
@@ -1511,10 +1513,10 @@ class BluezeroGATTServer:
 
         self._log(f"Central connected: {central_address} (MTU: {effective_mtu})")
 
-        # Notify callback
+        # Notify callback (identity not available yet for peripheral connections)
         if self.driver.on_device_connected:
             try:
-                self.driver.on_device_connected(central_address)
+                self.driver.on_device_connected(central_address, None)
             except Exception as e:
                 self._log(f"Error in device connected callback: {e}", "ERROR")
 

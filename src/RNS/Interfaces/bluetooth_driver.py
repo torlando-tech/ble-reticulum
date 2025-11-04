@@ -44,7 +44,7 @@ class BLEDriverInterface(ABC):
     # implement and assign these callbacks to receive events from the driver.
 
     on_device_discovered: Optional[Callable[[BLEDevice], None]] = None
-    on_device_connected: Optional[Callable[[str], None]] = None  # address (MTU reported separately)
+    on_device_connected: Optional[Callable[[str, Optional[bytes]], None]] = None  # address, peer_identity (None for peripheral role)
     on_device_disconnected: Optional[Callable[[str], None]] = None  # address
     on_data_received: Optional[Callable[[str, bytes], None]] = None  # address, data
     on_mtu_negotiated: Optional[Callable[[str, int], None]] = None  # address, mtu
