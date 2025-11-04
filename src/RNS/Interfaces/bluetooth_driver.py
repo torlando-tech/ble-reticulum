@@ -182,6 +182,19 @@ class BLEDriverInterface(ABC):
         pass
 
     @abstractmethod
+    def get_peer_role(self, address: str) -> Optional[str]:
+        """
+        Returns the connection role for a connected peer.
+
+        Args:
+            address: The MAC address of the peer.
+
+        Returns:
+            A string ('central' or 'peripheral') or None if not connected.
+        """
+        pass
+
+    @abstractmethod
     def set_service_discovery_delay(self, seconds: float):
         """
         Sets the delay between connection establishment and service discovery.

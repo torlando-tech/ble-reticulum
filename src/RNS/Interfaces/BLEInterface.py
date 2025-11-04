@@ -646,37 +646,48 @@ class BLEInterface(Interface):
         Called when driver has established a connection. We read the identity
         characteristic and prepare to receive data.
         """
-        RNS.log(f"{self} connected to {address}, reading identity...", RNS.LOG_INFO)
+        # Check connection role to determine identity exchange method
+        role = self.driver.get_peer_role(address)
 
-        # Read identity characteristic
-        try:
-            identity_bytes = self.driver.read_characteristic(
-                address,
-                BLEInterface.CHARACTERISTIC_IDENTITY_UUID
-            )
+        if role == "central":
+            # We are the central, we must read the peer's identity
+            RNS.log(f"{self} connected to {address} as CENTRAL, reading identity...", RNS.LOG_INFO)
+            try:
+                identity_bytes = self.driver.read_characteristic(
+                    address,
+                    BLEInterface.CHARACTERISTIC_IDENTITY_UUID
+                )
 
-            if identity_bytes and len(identity_bytes) == 16:
-                peer_identity = bytes(identity_bytes)
-                identity_hash = self._compute_identity_hash(peer_identity)
+                if identity_bytes and len(identity_bytes) == 16:
+                    peer_identity = bytes(identity_bytes)
+                    identity_hash = self._compute_identity_hash(peer_identity)
 
-                # Store identity mappings
-                self.address_to_identity[address] = peer_identity
-                self.identity_to_address[identity_hash] = address
+                    # Store identity mappings
+                    self.address_to_identity[address] = peer_identity
+                    self.identity_to_address[identity_hash] = address
 
-                RNS.log(f"{self} received peer identity from {address}: {identity_hash}", RNS.LOG_INFO)
+                    RNS.log(f"{self} received peer identity from {address}: {identity_hash}", RNS.LOG_INFO)
+                    self._record_connection_success(address)
+                else:
+                    RNS.log(f"{self} invalid identity from {address}, disconnecting", RNS.LOG_WARNING)
+                    self.driver.disconnect(address)
+                    self._record_connection_failure(address)
 
-                # Record successful connection
-                self._record_connection_success(address)
-
-            else:
-                RNS.log(f"{self} invalid identity from {address}, disconnecting", RNS.LOG_WARNING)
+            except Exception as e:
+                RNS.log(f"{self} failed to read identity from {address}: {e}", RNS.LOG_ERROR)
                 self.driver.disconnect(address)
                 self._record_connection_failure(address)
 
-        except Exception as e:
-            RNS.log(f"{self} failed to read identity from {address}: {e}", RNS.LOG_ERROR)
+        elif role == "peripheral":
+            # We are the peripheral, we must wait for the central to send its identity
+            RNS.log(f"{self} connected to {address} as PERIPHERAL, waiting for identity handshake...", RNS.LOG_INFO)
+            # The identity will be received in `handle_peripheral_data` or `_data_received_callback`
+            # No action is needed here.
+            pass
+
+        else:
+            RNS.log(f"{self} connected to {address}, but role is unknown. Disconnecting.", RNS.LOG_WARNING)
             self.driver.disconnect(address)
-            self._record_connection_failure(address)
 
     def _mtu_negotiated_callback(self, address: str, mtu: int):
         """
