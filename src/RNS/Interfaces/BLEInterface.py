@@ -96,25 +96,17 @@ except ImportError:
     except ImportError:
         HAS_GATT_SERVER = False
 
-# Import driver abstraction (relative import)
+# Import driver abstraction
 try:
-    from .bluetooth_driver import BLEDriverInterface, BLEDevice
+    from bluetooth_driver import BLEDriverInterface, BLEDevice
 except ImportError:
-    # Fallback for development/testing
-    try:
-        from RNS.Interfaces.bluetooth_driver import BLEDriverInterface, BLEDevice
-    except ImportError:
-        from bluetooth_driver import BLEDriverInterface, BLEDevice
+    from RNS.Interfaces.bluetooth_driver import BLEDriverInterface, BLEDevice
 
-# Import platform-specific driver (relative import)
+# Import platform-specific driver
 try:
-    from .linux_bluetooth_driver import LinuxBluetoothDriver
+    from linux_bluetooth_driver import LinuxBluetoothDriver
 except ImportError:
-    # Fallback for development/testing
-    try:
-        from RNS.Interfaces.linux_bluetooth_driver import LinuxBluetoothDriver
-    except ImportError:
-        from linux_bluetooth_driver import LinuxBluetoothDriver
+    from RNS.Interfaces.linux_bluetooth_driver import LinuxBluetoothDriver
 
 HAS_DRIVER = True
 
