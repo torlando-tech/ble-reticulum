@@ -1017,7 +1017,7 @@ class LinuxBluetoothDriver(BLEDriverInterface):
             result = future.result(timeout=5.0)
             return bytes(result)
         except Exception as e:
-            self._log(f"Error reading characteristic {char_uuid} from {address}: {e}", "ERROR")
+            self._log(f"Error reading characteristic {char_uuid} from {address}: {type(e).__name__}: {e}", "ERROR")
             raise
 
     def write_characteristic(self, address: str, char_uuid: str, data: bytes):
@@ -1203,10 +1203,10 @@ class BluezeroGATTServer:
         self.adapter_index = adapter_index
         self.agent_capability = agent_capability
 
-        # State
-        self.running = False
+        # bluezero objects
         self.peripheral_obj = None
         self.tx_characteristic = None
+        self.identity_characteristic = None
 
         # Identity
         self.identity_bytes: Optional[bytes] = None
@@ -1233,6 +1233,10 @@ class BluezeroGATTServer:
             raise ValueError("Identity must be 16 bytes")
 
         self.identity_bytes = identity_bytes
+        # Proactively update the characteristic value if it already exists
+        if self.identity_characteristic:
+            self.identity_characteristic.set_value(list(self.identity_bytes))
+
         self._log(f"Identity set: {identity_bytes.hex()}")
 
     def start(self, device_name: str):
@@ -1368,16 +1372,16 @@ class BluezeroGATTServer:
             self._log(f"Added TX characteristic: {self.tx_char_uuid}", "DEBUG")
 
             # Add Identity characteristic (centrals read our identity)
-            identity_value = list(self.identity_bytes) if self.identity_bytes else []
             self.peripheral_obj.add_characteristic(
                 srv_id=1,
                 chr_id=3,
                 uuid=self.identity_char_uuid,
-                value=identity_value,
+                value=[0]*16,  # Initialize with 16-byte placeholder
                 notifying=False,
                 flags=['read'],
                 read_callback=self._handle_read_identity
             )
+            self.identity_characteristic = self.peripheral_obj.characteristics[-1]
             self._log(f"Added Identity characteristic: {self.identity_char_uuid}", "DEBUG")
 
             # Save TX characteristic reference
