@@ -618,6 +618,11 @@ class BLEInterface(Interface):
         This callback is invoked by the driver when a device is discovered during scanning.
         We use peer scoring and connection logic to decide whether to connect.
         """
+        # Primary: Match by service UUID (standard BLE discovery)
+        if self.service_uuid not in device.service_uuids:
+            RNS.log(f"{self} device {device.name if device.name else device.address} does not advertise Reticulum service UUID, skipping", RNS.LOG_EXTREME)
+            return
+
         # Update or create discovered peer entry
         if device.address not in self.discovered_peers:
             self.discovered_peers[device.address] = DiscoveredPeer(
