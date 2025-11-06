@@ -64,10 +64,10 @@ The BLE Reticulum Protocol enables mesh networking over Bluetooth Low Energy (BL
 - Centrals read peripheral identities via GATT characteristic
 - Address-based fragmenter keys
 
-### v2.1 (Identity-Based Naming)
-- Device names encode identity: `RNS-{32-hex-identity-hash}`
-- Bypasses bluezero service UUID bug (name-based discovery fallback)
-- Identity mappings stored during discovery
+### v2.1 (Identity-Based Naming) - Deprecated
+- **Deprecated:** Device names previously encoded identity: `RNS-{32-hex-identity-hash}`
+- **Issue:** 36-character names exceeded 31-byte BLE advertisement packet limit
+- **Replaced in v2.2+:** Device names now optional (default: omitted)
 
 ### v2.2 (Current - Identity Handshake)
 - **Identity handshake:** Centrals send 16-byte identity to peripherals
@@ -89,31 +89,28 @@ All Reticulum BLE devices advertise this service UUID to enable discovery.
 
 ### Device Naming Convention
 
-**Format:**
+**Device names are optional** and configurable via the `device_name` parameter in the BLE interface configuration. The default is `None` (no device name in advertisement).
+
+**Rationale:**
+- BLE advertisements have a **31-byte packet size limit**
+- Including the 128-bit service UUID (18 bytes) and flags (3 bytes) leaves only ~10 bytes
+- Device names compete for limited advertisement space
+- **Discovery is based on service UUID matching only** (device name is not used for peer discovery)
+- **Identity is obtained from the Identity GATT characteristic** after connection, not from the device name
+
+**Recommended:**
+- **Omit device name** (default: `None`) to maximize advertisement reliability
+- If a name is needed for debugging, keep it very short (max 8 characters)
+  - Example: `"RNS"`, `"Node1"`, etc.
+
+**Configuration:**
+```ini
+[[BLE Interface]]
+  type = BLEInterface
+  enabled = True
+  # device_name = None    # Default: no device name (recommended)
+  # device_name = RNS     # Optional: short name for debugging
 ```
-RNS-{32-hex-characters}
-```
-
-**Example:**
-```
-RNS-680069b61fa51cde5a751ed2396ce46d
-```
-
-Where `680069b61fa51cde5a751ed2396ce46d` is derived from the device's Reticulum identity:
-- Take `RNS.Identity.full_hash(identity)` (cryptographic hash)
-- Extract first 16 bytes: `[:16]`
-- Convert to hexadecimal: `.hex()` → 32 hex characters
-- Result: Device name contains 32-character identity fingerprint
-
-### Why Embed Identity in Name?
-
-The bluezero GATT server library (used for peripheral mode) has a known bug where service UUIDs are not properly exposed in BLE advertisements when queried via Bleak scanners. Clients see `service_uuids=[]` even though the service is registered.
-
-**Workaround:**
-By embedding the identity in the device name, scanners can:
-1. Match by service UUID (preferred, when it works)
-2. Fall back to name pattern matching: `^RNS-[0-9a-f]{32}$`
-3. Extract identity directly from the name, bypassing GATT characteristic reads
 
 ### Advertisement Interval
 
@@ -316,40 +313,36 @@ BLE devices can **rotate MAC addresses** for privacy reasons. If fragmenters/rea
 
 ### Solution: Identity-Based Keys
 
-All peer-specific data structures (fragmenters, reassemblers, interfaces) are keyed by a **16-character hex string derived from the peer's identity hash**.
+All peer-specific data structures (fragmenters, reassemblers, interfaces) are keyed by a **32-character hex string representing the full 16-byte peer identity**.
 
 ### Key Computation
 
 ```python
 def _get_fragmenter_key(self, peer_identity, peer_address):
     """
-    Compute fragmenter/reassembler dictionary key using identity hash.
+    Compute fragmenter/reassembler dictionary key using full identity.
 
     Args:
         peer_identity: 16-byte identity hash
         peer_address: BLE MAC address (unused in v2.2, kept for compatibility)
 
     Returns:
-        16-character hex string (e.g., "680069b61fa51cde")
+        32-character hex string representing full 16-byte identity
     """
-    return RNS.Identity.full_hash(peer_identity)[:16].hex()[:16]
+    return peer_identity.hex()
 ```
 
-**Key Derivation Steps:**
-1. `RNS.Identity.full_hash(peer_identity)` - Compute cryptographic hash
-2. `[:16]` - Take first 16 bytes
-3. `.hex()` - Convert to 32 hex characters
-4. `[:16]` - Take first 16 hex characters (representing 8 bytes)
-5. Result: 16-character hex string used as dictionary key
+**Key Derivation:**
+- Uses the **full 16-byte peer identity** directly as hex string (32 characters)
+- Avoids collision risk that would exist with shortened keys
+- Example: `"680069b61fa51cde5a751ed2396ce46d"` (32 hex chars = 16 bytes)
 
 **Example:**
 ```python
-peer_identity = bytes.fromhex("680069b61fa51cde5a751ed2396ce46d")  # 16 bytes from device name
+peer_identity = bytes.fromhex("680069b61fa51cde5a751ed2396ce46d")  # 16 bytes from Identity characteristic
 frag_key = _get_fragmenter_key(peer_identity, "B8:27:EB:10:28:CD")
-# Result: "680069b61fa51cde" (16 hex chars, first half of hash)
+# Result: "680069b61fa51cde5a751ed2396ce46d" (32 hex chars, full identity)
 ```
-
-**Note:** The fragmenter key (16 hex chars) is shorter than the device name identity (32 hex chars) for efficiency, but both are derived from the same identity hash.
 
 ### Identity Mapping Tables
 
@@ -361,30 +354,30 @@ self.address_to_identity = {
     "B8:27:EB:10:28:CD": b'\x68\x00\x69\xb6\x1f\xa5\x1c\xde...',
 }
 
-# 16-char identity hash → MAC address
+# Full 32-char identity hash → MAC address
 self.identity_to_address = {
-    "680069b61fa51cde": "B8:27:EB:10:28:CD",
+    "680069b61fa51cde5a751ed2396ce46d": "B8:27:EB:10:28:CD",
 }
 ```
 
 ### Dictionary Structures
 
 ```python
-# Fragmenters (keyed by identity hash)
+# Fragmenters (keyed by full 32-char identity hash)
 self.fragmenters = {
-    "680069b61fa51cde": BLEFragmenter(mtu=517),
-    "a1b2c3d4e5f6g7h8": BLEFragmenter(mtu=23),
+    "680069b61fa51cde5a751ed2396ce46d": BLEFragmenter(mtu=517),
+    "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6": BLEFragmenter(mtu=23),
 }
 
-# Reassemblers (keyed by identity hash)
+# Reassemblers (keyed by full 32-char identity hash)
 self.reassemblers = {
-    "680069b61fa51cde": BLEReassembler(timeout=30.0),
-    "a1b2c3d4e5f6g7h8": BLEReassembler(timeout=30.0),
+    "680069b61fa51cde5a751ed2396ce46d": BLEReassembler(timeout=30.0),
+    "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6": BLEReassembler(timeout=30.0),
 }
 
-# Peer interfaces (keyed by identity hash)
+# Peer interfaces (keyed by full 32-char identity hash)
 self.spawned_interfaces = {
-    "680069b61fa51cde": BLEPeerInterface(...),
+    "680069b61fa51cde5a751ed2396ce46d": BLEPeerInterface(...),
 }
 ```
 
@@ -525,12 +518,10 @@ Device A (Lower MAC)                     Device B (Higher MAC)
    |                                         |
    | 1. Start scanning (0.5-2s)              | 1. Start advertising
    |                                         |    - Service UUID
-   |                                         |    - Device name: RNS-{identity}
+   |                                         |    - Device name (optional)
    |                                         |
    | 2. Discover Device B                    |
-   |    - Match by service UUID or name      |
-   |    - Extract identity from name         |
-   |    - Store in address_to_identity       |
+   |    - Match by service UUID              |
    |                                         |
    | 3. MAC sorting check                    |
    |    my_mac < peer_mac → I connect        |
@@ -572,14 +563,12 @@ Device A (Lower MAC)                     Device B (Higher MAC)
 
 1. **Scan for BLE devices** (0.5-2.0 seconds depending on power mode)
 2. **Match peers:**
-   - Primary: Check `service_uuids` for Reticulum UUID
-   - Fallback: Check device name matches `^RNS-[0-9a-f]{32}$`
-3. **Extract identity:**
-   - Parse 32 hex chars from device name
-   - Convert to 16-byte identity
-   - Store in `address_to_identity[peer_address] = identity`
-4. **Score peers** by RSSI, history, recency
-5. **Select best peer** for connection
+   - Check `service_uuids` for Reticulum service UUID
+   - Device name is not used for matching (optional/omitted)
+3. **Score peers** by RSSI, history, recency
+4. **Select best peer** for connection
+
+**Note:** Identity is obtained from the Identity GATT characteristic after connection, not from the device name or during discovery.
 
 ### Connection Phase (Device A → Device B)
 
@@ -1382,8 +1371,7 @@ sequenceDiagram
         end
     end
 
-    BLE->>BLE: Generate identity-based device name
-    Note over BLE: Format: RNS-{32-hex-identity-hash}<br/>Example: RNS-680069b61fa51cde5a751ed2396ce46d
+    Note over BLE: Device name is optional (default: None)<br/>to fit in 31-byte BLE advertisement packet
 
     BLE->>Driver: set_identity(identity_16_bytes)
     Driver-->>BLE: Identity set
@@ -1440,7 +1428,7 @@ sequenceDiagram
     Note over Scanner: Scan cycle (every 5s)
     Scanner->>Scanner: Start BLE scan
 
-    Peer-->>Scanner: Advertisement<br/>Service: 37145b00-...<br/>Name: RNS-680069b61fa51cde...<br/>RSSI: -45 dBm
+    Peer-->>Scanner: Advertisement<br/>Service: 37145b00-...<br/>Name: (optional/omitted)<br/>RSSI: -45 dBm
 
     Scanner->>BLE: on_device_discovered(address, rssi, name, service_uuids)
 
@@ -1583,7 +1571,7 @@ sequenceDiagram
 
     Peripheral->>Peripheral: Extract central's identity
     Peripheral->>Peripheral: Compute identity hash
-    Note over Peripheral: hash = RNS.Identity.full_hash(identity)[:16].hex()[:16]<br/>Steps: hash → first 16 bytes → hex → first 16 chars<br/>Example: "680069b61fa51cde"
+    Note over Peripheral: hash = identity.hex()<br/>Uses full 16-byte identity as 32 hex chars<br/>Example: "680069b61fa51cde5a751ed2396ce46d"
 
     Peripheral->>Peripheral: Store bidirectional mappings
     Note over Peripheral: address_to_identity[central_addr] = identity_16_bytes<br/>identity_to_address[identity_hash] = central_addr
@@ -1626,10 +1614,10 @@ sequenceDiagram
 **Central Side:**
 ```python
 address_to_identity["B8:27:EB:A8:A7:22"] = b'\x68\x00\x69\xb6...'  # From discovery
-identity_to_address["680069b61fa51cde"] = "B8:27:EB:A8:A7:22"
-fragmenters["680069b61fa51cde"] = BLEFragmenter(mtu=517)
-reassemblers["680069b61fa51cde"] = BLEReassembler()
-spawned_interfaces["680069b61fa51cde"] = BLEPeerInterface(...)
+identity_to_address["680069b61fa51cde5a751ed2396ce46d"] = "B8:27:EB:A8:A7:22"
+fragmenters["680069b61fa51cde5a751ed2396ce46d"] = BLEFragmenter(mtu=517)
+reassemblers["680069b61fa51cde5a751ed2396ce46d"] = BLEReassembler()
+spawned_interfaces["680069b61fa51cde5a751ed2396ce46d"] = BLEPeerInterface(...)
 ```
 
 **Peripheral Side:**
@@ -1667,7 +1655,7 @@ sequenceDiagram
     Note over Transport: 233-byte announce packet<br/>Contains: identity, public key, hops, etc.
 
     BLE_If->>BLE_If: Look up fragmenter by identity hash
-    Note over BLE_If: Key: "680069b61fa51cde"
+    Note over BLE_If: Key: "680069b61fa51cde5a751ed2396ce46d"
 
     BLE_If->>Frag: fragment_packet(data, mtu=23)
     activate Frag

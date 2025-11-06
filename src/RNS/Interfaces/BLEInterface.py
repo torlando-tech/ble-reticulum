@@ -288,10 +288,11 @@ class BLEInterface(Interface):
 
         # BLE configuration
         self.service_uuid = c.get("service_uuid", BLEInterface.SERVICE_UUID)
-        # Device name will be set to identity-based name after Transport.identity is available
-        # Format: RNS-{identity_hash} where identity_hash is first 16 hex chars of Transport.identity
-        # This enables reliable discovery even when bluezero doesn't expose service UUIDs to Bleak
-        self.device_name = c.get("device_name", None)  # Will be auto-generated from identity if None
+        # Device name for BLE advertising (optional, configurable via config file)
+        # Default is None (no device name) to save advertisement packet space (31-byte limit).
+        # Discovery is based on service UUID only. Identity is obtained from the Identity
+        # characteristic after connection. If set, keep it short (max 8 chars recommended).
+        self.device_name = c.get("device_name", None)
         self.discovery_interval = float(c.get("discovery_interval", BLEInterface.DISCOVERY_INTERVAL))
         self.max_peers = int(c.get("max_connections", BLEInterface.MAX_PEERS))
         self.min_rssi = int(c.get("min_rssi", BLEInterface.MIN_RSSI))
@@ -487,19 +488,16 @@ class BLEInterface(Interface):
                         elapsed = time.time() - start_time
                         RNS.log(f"{self} Transport.identity available after {elapsed:.1f}s", RNS.LOG_INFO)
 
-                        # Generate identity-based device name if not configured
-                        if self.device_name is None:
-                            identity_str = identity_hash.hex()  # Full 16 bytes as 32 hex chars
-                            self.device_name = f"RNS-{identity_str}"
-                            RNS.log(f"{self} Auto-generated identity-based device name: {self.device_name}", RNS.LOG_INFO)
-
                         # Set identity on driver
                         self.driver.set_identity(identity_hash)
 
                         # Start advertising
                         try:
                             self.driver.start_advertising(self.device_name, identity_hash)
-                            RNS.log(f"{self} Started advertising as {self.device_name}", RNS.LOG_INFO)
+                            if self.device_name:
+                                RNS.log(f"{self} Started advertising as {self.device_name}", RNS.LOG_INFO)
+                            else:
+                                RNS.log(f"{self} Started advertising (no device name)", RNS.LOG_INFO)
                         except Exception as e:
                             RNS.log(f"{self} Failed to start advertising: {e}", RNS.LOG_ERROR)
 
@@ -1138,16 +1136,16 @@ class BLEInterface(Interface):
 
     def _get_fragmenter_key(self, peer_identity, peer_address):
         """
-        Compute fragmenter/reassembler dictionary key using identity hash.
+        Compute fragmenter/reassembler dictionary key using full identity hash.
 
         Args:
             peer_identity: 16-byte peer identity
             peer_address: BLE MAC address (unused, kept for compatibility)
 
         Returns:
-            str: Identity hash (16 hex chars)
+            str: Full 16-byte identity as 32 hex characters
         """
-        return RNS.Identity.full_hash(peer_identity)[:16].hex()[:16]
+        return peer_identity.hex()
 
     def _compute_identity_hash(self, peer_identity):
         """

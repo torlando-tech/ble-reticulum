@@ -622,7 +622,7 @@ class LinuxBluetoothDriver(BLEDriverInterface):
     # Advertising (Peripheral Mode)
     # ========================================================================
 
-    def start_advertising(self, device_name: str, identity: bytes):
+    def start_advertising(self, device_name: Optional[str], identity: bytes):
         """Start advertising as a BLE peripheral."""
         if not self._running:
             self._log("Cannot start advertising: driver not running", "ERROR")
@@ -638,7 +638,10 @@ class LinuxBluetoothDriver(BLEDriverInterface):
             self._log("Already advertising", "DEBUG")
             return
 
-        self._log(f"Starting BLE advertising as '{device_name}'...")
+        if device_name:
+            self._log(f"Starting BLE advertising as '{device_name}'...")
+        else:
+            self._log("Starting BLE advertising (no device name)...")
 
         # Set identity
         self.set_identity(identity)
@@ -1263,7 +1266,7 @@ class BluezeroGATTServer:
 
         self._log(f"Identity set: {identity_bytes.hex()}")
 
-    def start(self, device_name: str):
+    def start(self, device_name: Optional[str]):
         """Start GATT server and advertising."""
         if self.running:
             self._log("Server already running", "WARNING")
@@ -1273,7 +1276,10 @@ class BluezeroGATTServer:
         if not self.identity_bytes:
             raise RuntimeError("Identity must be set before starting GATT server. Call set_identity() first.")
 
-        self._log(f"Starting GATT server with device name '{device_name}'...")
+        if device_name:
+            self._log(f"Starting GATT server with device name '{device_name}'...")
+        else:
+            self._log("Starting GATT server (no device name)...")
 
         # Reset events
         self.stop_event.clear()
@@ -1362,11 +1368,14 @@ class BluezeroGATTServer:
             adapter_address = local_adapter.address
             self._log(f"Using adapter: {adapter_address}", "DEBUG")
 
-            # Create peripheral
-            self.peripheral_obj = peripheral.Peripheral(
-                adapter_address,
-                local_name=device_name
-            )
+            # Create peripheral (omit local_name if None to save advertisement packet space)
+            if device_name:
+                self.peripheral_obj = peripheral.Peripheral(
+                    adapter_address,
+                    local_name=device_name
+                )
+            else:
+                self.peripheral_obj = peripheral.Peripheral(adapter_address)
 
             # Add service
             self.peripheral_obj.add_service(
