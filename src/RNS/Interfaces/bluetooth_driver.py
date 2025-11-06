@@ -107,10 +107,15 @@ class BLEDriverInterface(ABC):
         pass
 
     @abstractmethod
-    def start_advertising(self, device_name: str, identity: bytes):
+    def start_advertising(self, device_name: Optional[str], identity: bytes):
         """
-        Starts advertising the configured service UUID and the given device name.
+        Starts advertising the configured service UUID and optionally a device name.
         The identity parameter is used to populate the Identity characteristic.
+
+        Args:
+            device_name: Optional device name to include in advertisement (None to omit).
+                        Keep short (max 8 chars) to fit in 31-byte BLE advertisement packet.
+            identity: 16-byte identity hash for the Identity characteristic.
         """
         pass
 

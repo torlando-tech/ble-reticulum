@@ -159,8 +159,8 @@ Add the BLE interface to your Reticulum configuration (`~/.reticulum/config`):
   type = BLEInterface
   enabled = yes
 
-  # Optional: customize device name
-  # device_name = My-Reticulum-Node
+  # Optional: set short device name (max 8 chars recommended, default: none)
+  # device_name = RNS
 ```
 
 For detailed configuration options, see [`examples/config_example.toml`](examples/config_example.toml).
@@ -195,7 +195,7 @@ The BLE interface supports extensive configuration options. See [`examples/confi
 
 ### Key Configuration Options
 
-- **`device_name`**: Advertised device name (auto-generated if not specified)
+- **`device_name`**: Optional BLE device name (default: none, keep short if used, max 8 chars recommended)
 - **`service_uuid`**: BLE service UUID (must match on all devices)
 - **`enable_peripheral`**: Accept incoming connections (default: yes)
 - **`enable_central`**: Scan and connect to peers (default: yes)
