@@ -756,14 +756,19 @@ class LinuxBluetoothDriver(BLEDriverInterface):
 
             # Try LE-specific connection if BlueZ >= 5.49
             le_connection_attempted = False
-            if self.bluez_version and self.bluez_version >= (5, 49) and self.has_connect_device is None:
+            if self.bluez_version and self.bluez_version >= (5, 49) and self.has_connect_device != False:
                 try:
                     await self._connect_via_dbus_le(address)
                     le_connection_attempted = True
-                    self._log(f"LE-specific connection initiated for {address}", "DEBUG")
-                except Exception as e:
-                    self._log(f"ConnectDevice() unavailable, falling back to standard connection", "DEBUG")
+                    self._log(f"LE-specific connection initiated for {address}", "INFO")
+                except AttributeError as e:
+                    # ConnectDevice method doesn't exist in this BlueZ version
+                    self._log(f"ConnectDevice() method not available: {e}", "WARNING")
                     self.has_connect_device = False
+                except Exception as e:
+                    # ConnectDevice exists but failed - retry on next connection
+                    self._log(f"ConnectDevice() failed (will retry): {e}", "WARNING")
+                    # Don't set has_connect_device to False - allow retry
 
             # Create BleakClient
             client = BleakClient(address, disconnected_callback=disconnected_callback, timeout=self.connection_timeout)
