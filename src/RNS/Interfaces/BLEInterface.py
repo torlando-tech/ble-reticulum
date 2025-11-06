@@ -40,6 +40,7 @@ import os
 import threading
 import time
 import asyncio
+import logging
 from collections import deque
 from typing import Optional
 
@@ -375,6 +376,9 @@ class BLEInterface(Interface):
         self.driver.on_device_disconnected = self._device_disconnected_callback
         self.driver.on_error = self._error_callback
 
+        # Redirect Python logging to RNS logging for proper formatting
+        self._setup_logging_redirect()
+
         # Set driver power mode
         self.driver.set_power_mode(self.power_mode)
 
@@ -463,6 +467,60 @@ class BLEInterface(Interface):
             RNS.log(f"{self} Launching driver advertising startup thread (will wait for Transport.identity)", RNS.LOG_DEBUG)
             startup_thread = threading.Thread(target=self._start_advertising_when_identity_ready, daemon=True, name="BLE-Advertising-Startup")
             startup_thread.start()
+
+    def _setup_logging_redirect(self):
+        """
+        Redirect Python logging from the BLE driver to RNS logging for consistent formatting.
+        Only redirects logs from 'root' logger (used by linux_bluetooth_driver), not from
+        underlying libraries like bleak, dbus_fast, etc.
+        """
+        class RNSLoggingHandler(logging.Handler):
+            def __init__(self, interface_name):
+                super().__init__()
+                self.interface_name = interface_name
+
+            def emit(self, record):
+                try:
+                    # Only process logs from root logger (linux_bluetooth_driver)
+                    # Ignore verbose logs from underlying libraries (bleak, dbus_fast, etc.)
+                    if record.name != 'root':
+                        return
+
+                    # Map Python logging levels to RNS log levels
+                    level_map = {
+                        logging.DEBUG: RNS.LOG_DEBUG,
+                        logging.INFO: RNS.LOG_INFO,
+                        logging.WARNING: RNS.LOG_WARNING,
+                        logging.ERROR: RNS.LOG_ERROR,
+                        logging.CRITICAL: RNS.LOG_CRITICAL
+                    }
+                    rns_level = level_map.get(record.levelno, RNS.LOG_INFO)
+
+                    # Format message
+                    message = self.format(record)
+
+                    # Log to RNS
+                    RNS.log(f"{self.interface_name} {message}", rns_level)
+                except Exception:
+                    # Silently fail if RNS logging fails (don't want to break the driver)
+                    pass
+
+        # Get root logger (used by linux_bluetooth_driver)
+        root_logger = logging.getLogger()
+
+        # Remove any existing stream handlers from root logger to prevent duplicate console output
+        for handler in root_logger.handlers[:]:
+            if isinstance(handler, logging.StreamHandler):
+                root_logger.removeHandler(handler)
+
+        # Only add handler if not already added (avoid duplicates)
+        handler_exists = any(isinstance(h, RNSLoggingHandler) for h in root_logger.handlers)
+        if not handler_exists:
+            handler = RNSLoggingHandler(str(self))
+            handler.setLevel(logging.INFO)  # Only INFO and above from driver
+            handler.setFormatter(logging.Formatter('%(message)s'))
+            root_logger.addHandler(handler)
+            root_logger.setLevel(logging.INFO)  # Don't capture DEBUG from libraries
 
     def _start_advertising_when_identity_ready(self):
         """
