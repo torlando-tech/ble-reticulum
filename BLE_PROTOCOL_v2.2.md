@@ -20,6 +20,15 @@
 10. [Error Handling & Edge Cases](#error-handling--edge-cases)
 11. [Backwards Compatibility](#backwards-compatibility)
 12. [Troubleshooting Guide](#troubleshooting-guide)
+13. [Configuration Reference](#configuration-reference)
+14. [Platform-Specific Workarounds](#platform-specific-workarounds)
+15. [Complete Lifecycle Sequence Diagrams](#complete-lifecycle-sequence-diagrams)
+    - [Diagram 1: System Initialization](#diagram-1-system-initialization)
+    - [Diagram 2: Discovery and Peer Scoring](#diagram-2-discovery-and-peer-scoring)
+    - [Diagram 3: Connection Establishment](#diagram-3-connection-establishment-dual-perspective)
+    - [Diagram 4: Data Flow](#diagram-4-data-flow---reticulum-announces--lxmf-messages)
+    - [Diagram 5: Disconnection and Cleanup](#diagram-5-disconnection-and-cleanup)
+14. [UUID Reference](#uuid-reference)
 
 ---
 
@@ -90,7 +99,11 @@ RNS-{32-hex-characters}
 RNS-680069b61fa51cde5a751ed2396ce46d
 ```
 
-Where `680069b61fa51cde5a751ed2396ce46d` is the first 16 bytes of the device's Reticulum identity hash, encoded as hexadecimal.
+Where `680069b61fa51cde5a751ed2396ce46d` is derived from the device's Reticulum identity:
+- Take `RNS.Identity.full_hash(identity)` (cryptographic hash)
+- Extract first 16 bytes: `[:16]`
+- Convert to hexadecimal: `.hex()` → 32 hex characters
+- Result: Device name contains 32-character identity fingerprint
 
 ### Why Embed Identity in Name?
 
@@ -322,12 +335,21 @@ def _get_fragmenter_key(self, peer_identity, peer_address):
     return RNS.Identity.full_hash(peer_identity)[:16].hex()[:16]
 ```
 
+**Key Derivation Steps:**
+1. `RNS.Identity.full_hash(peer_identity)` - Compute cryptographic hash
+2. `[:16]` - Take first 16 bytes
+3. `.hex()` - Convert to 32 hex characters
+4. `[:16]` - Take first 16 hex characters (representing 8 bytes)
+5. Result: 16-character hex string used as dictionary key
+
 **Example:**
 ```python
-peer_identity = bytes.fromhex("680069b61fa51cde5a751ed2396ce46d")
+peer_identity = bytes.fromhex("680069b61fa51cde5a751ed2396ce46d")  # 16 bytes from device name
 frag_key = _get_fragmenter_key(peer_identity, "B8:27:EB:10:28:CD")
-# Result: "680069b61fa51cde"
+# Result: "680069b61fa51cde" (16 hex chars, first half of hash)
 ```
+
+**Note:** The fragmenter key (16 hex chars) is shorter than the device name identity (32 hex chars) for efficiency, but both are derived from the same identity hash.
 
 ### Identity Mapping Tables
 
@@ -397,15 +419,21 @@ mtu = client.mtu_size  # e.g., 517
 ```
 
 **Payload Size:**
-Each BLE packet has a 3-byte ATT header + 2-byte handle, leaving:
+The MTU value already accounts for BLE protocol overhead (ATT header + handle). The fragmentation layer adds a 5-byte header (Type + Sequence + Total) to each fragment:
 ```
-payload_size = mtu - 5
+payload_size = mtu - 5  # 5 bytes for fragmentation header
 ```
 
 For MTU=23:
 ```
-payload_size = 23 - 5 = 18 bytes
+payload_size = 23 - 5 = 18 bytes  # 18 bytes available for actual data
 ```
+
+**Fragment Header Breakdown:**
+- Byte 0: Type (1 byte) - START, CONTINUE, or END marker
+- Bytes 1-2: Sequence number (2 bytes) - fragment ordering
+- Bytes 3-4: Total fragments (2 bytes) - packet reassembly
+- Bytes 5+: Payload data (mtu - 5 bytes)
 
 ### Fragmentation
 
@@ -941,7 +969,1073 @@ bluetoothctl power on
 
 ---
 
-## Appendix: UUID Reference
+### Problem: LXMF messages fail to route over BLE despite connected peers
+
+**Symptoms:**
+- BLE peers are connected and showing in interface stats
+- Logs show "no known path to destination"
+- LXMF messages fail to deliver
+- After Reticulum restart, paths that worked before no longer work
+
+**Cause:** Stale BLE path entries in Reticulum's path table (Bug #13). Reticulum loads paths from storage with `timestamp=0` or very old timestamps, causing them to immediately fail the freshness check.
+
+**Automatic Fix:**
+The BLE interface **automatically cleans stale paths on startup**. No user action required. This workaround:
+1. Scans `Transport.path_table` for BLE paths on interface init
+2. Removes paths with `timestamp == 0` (Unix epoch bug)
+3. Removes paths older than 60 seconds (stale from previous session)
+4. Forces fresh path discovery via announces
+
+**Expected Behavior:**
+- After Reticulum restart, stale paths are cleared within 1-2 seconds
+- Fresh announces propagate within 30-60 seconds
+- New paths are established automatically
+- LXMF message delivery resumes
+
+**Manual Verification:**
+```python
+# Check for stale BLE paths (should be none after interface starts)
+import RNS.Transport as Transport
+for dest_hash, entry in Transport.path_table.items():
+    timestamp = entry[0]
+    interface = entry[5]
+    if "BLE" in str(type(interface).__name__):
+        age = time.time() - timestamp
+        print(f"BLE path age: {age:.0f}s (should be <60s)")
+```
+
+**See Also:** Platform-Specific Workarounds → Stale BLE Path Cleanup for implementation details.
+
+---
+
+## Configuration Reference
+
+This section documents all configuration parameters available for the BLE interface. These are set in the Reticulum configuration file (e.g., `~/.reticulum/config`).
+
+### Basic Configuration Example
+
+```ini
+[[BLE Interface]]
+  type = BLEInterface
+  enabled = True
+  max_peers = 7
+  service_discovery_delay = 1.5
+```
+
+### Connection Parameters
+
+#### `max_peers`
+- **Type:** Integer
+- **Default:** `7`
+- **Description:** Maximum number of simultaneous BLE peer connections. Each connection consumes system resources (file descriptors, memory for fragmenters/reassemblers). On resource-constrained devices like Raspberry Pi Zero, keep this value conservative.
+- **Range:** 1-10 (practical limit depends on hardware)
+- **Example:** `max_peers = 5`
+
+#### `max_discovered_peers`
+- **Type:** Integer
+- **Default:** `100`
+- **Description:** Maximum number of discovered peers to cache in memory. Prevents unbounded memory growth in dense BLE environments with many advertising devices. Oldest/lowest-scored peers are evicted when limit is reached.
+- **Range:** 10-500
+- **Example:** `max_discovered_peers = 50`
+
+#### `connection_retry_backoff`
+- **Type:** Integer (seconds)
+- **Default:** `60`
+- **Description:** Base backoff duration for failed connection attempts. Multiplied by failure count for linear backoff (see Blacklist Backoff Schedule in Diagram 5).
+- **Range:** 30-300
+- **Example:** `connection_retry_backoff = 120`
+
+#### `max_connection_failures`
+- **Type:** Integer
+- **Default:** `3`
+- **Description:** Number of consecutive connection failures before blacklisting a peer. Once blacklisted, exponential backoff prevents connection storms.
+- **Range:** 1-10
+- **Example:** `max_connection_failures = 5`
+
+### Timing Parameters
+
+#### `service_discovery_delay`
+- **Type:** Float (seconds)
+- **Default:** `1.5`
+- **Description:** Delay after BLE connection before GATT service discovery. Works around BlueZ D-Bus registration timing issues with bluezero peripherals. Increase if you see "Reticulum service not found" errors.
+- **Range:** 0.5-5.0
+- **Recommended:** 1.5-2.5 for bluezero peripherals, 0.5-1.0 for other BLE devices
+- **Example:** `service_discovery_delay = 2.0`
+
+#### `connection_timeout`
+- **Type:** Integer (seconds)
+- **Default:** `30`
+- **Description:** Timeout for reassembly of fragmented packets. If fragments stop arriving, partial packet is discarded after this duration. Also used for connection establishment timeout.
+- **Range:** 10-120
+- **Example:** `connection_timeout = 60`
+
+### Discovery Parameters
+
+#### `scan_interval`
+- **Type:** Integer (seconds)
+- **Default:** `5`
+- **Description:** Interval between BLE discovery scans. Lower values increase responsiveness but consume more power. Higher values reduce power consumption but delay peer discovery.
+- **Range:** 1-60
+- **Example:** `scan_interval = 10`
+
+#### `min_rssi`
+- **Type:** Integer (dBm)
+- **Default:** `-85`
+- **Description:** Minimum signal strength threshold for peer discovery. Peers with RSSI weaker than this value are ignored during scanning. Lower (more negative) values allow connection to more distant peers but may result in less reliable connections.
+- **Range:** -100 to -30 (typical: -95 to -60)
+- **Example:** `min_rssi = -75`
+
+#### `power_mode`
+- **Type:** String
+- **Default:** `balanced`
+- **Description:** Power management mode for BLE scanning. Controls scan frequency and duration to balance responsiveness vs. battery consumption.
+- **Options:**
+  - `aggressive`: Continuous scanning (high responsiveness, high power consumption)
+  - `balanced`: Intermittent scanning (medium responsiveness, medium power consumption)
+  - `saver`: Minimal scanning (low responsiveness, low power consumption)
+- **Values:** `aggressive`, `balanced`, `saver`
+- **Example:** `power_mode = saver`
+
+### Advanced Parameters
+
+#### `enable_local_announce_forwarding`
+- **Type:** Boolean
+- **Default:** `False`
+- **Description:** **Workaround for Reticulum core behavior.** By default, Reticulum Transport doesn't forward locally-originated announces (hops=0) to physical interfaces. Enable this to manually forward local announces to BLE peers, ensuring they can discover this node even if Transport doesn't propagate the announce.
+- **Use Case:** Mesh edge nodes where local services need to be discoverable via BLE
+- **Example:** `enable_local_announce_forwarding = True`
+
+#### `enable_central`
+- **Type:** Boolean
+- **Default:** `True`
+- **Description:** Enable central mode (active scanning and connection initiation). Disable to operate in peripheral-only mode (advertising only, accepting connections).
+- **Example:** `enable_central = False`
+
+#### `enable_peripheral`
+- **Type:** Boolean
+- **Default:** `True`
+- **Description:** Enable peripheral mode (advertising and accepting connections). Disable to operate in central-only mode (scanning and connecting only).
+- **Example:** `enable_peripheral = False`
+
+### Example Configurations
+
+#### High-Performance Node (Raspberry Pi 4)
+```ini
+[[BLE Interface]]
+  type = BLEInterface
+  enabled = True
+  max_peers = 10
+  max_discovered_peers = 200
+  scan_interval = 3
+  service_discovery_delay = 1.0
+  connection_timeout = 60
+```
+
+#### Resource-Constrained Node (Raspberry Pi Zero)
+```ini
+[[BLE Interface]]
+  type = BLEInterface
+  enabled = True
+  max_peers = 3
+  max_discovered_peers = 50
+  scan_interval = 10
+  service_discovery_delay = 2.0
+  connection_timeout = 30
+```
+
+#### Peripheral-Only Node (Advertising only)
+```ini
+[[BLE Interface]]
+  type = BLEInterface
+  enabled = True
+  enable_central = False
+  enable_peripheral = True
+  max_peers = 5
+```
+
+#### Central-Only Node (Scanning only, no advertising)
+```ini
+[[BLE Interface]]
+  type = BLEInterface
+  enabled = True
+  enable_central = True
+  enable_peripheral = False
+  max_peers = 7
+```
+
+---
+
+## Platform-Specific Workarounds
+
+This section documents critical platform-specific workarounds implemented in the BLE interface for Linux/BlueZ compatibility. These are automatically applied and require no user configuration, but are documented here for transparency and troubleshooting.
+
+### BlueZ ServicesResolved Race Condition Patch
+
+**Platform:** Linux with BlueZ 5.x + Bleak
+
+**Problem:** When connecting to a bluezero GATT peripheral, BlueZ sets the `ServicesResolved` property to `True` before GATT services are fully exported to D-Bus. Bleak's `connect()` returns immediately after `ServicesResolved=True`, but subsequent `get_services()` calls find no services, causing "Reticulum service not found" errors.
+
+**Root Cause:** Timing gap between BlueZ internal service resolution and D-Bus object publication (typically 50-500ms).
+
+**Workaround:** The `linux_bluetooth_driver.py` applies a monkey patch to Bleak's `BlueZManager._wait_for_services_discovery()` method that polls for actual service presence in D-Bus after `ServicesResolved=True`:
+
+```python
+# Poll up to 2 seconds (20 × 100ms) for services to appear
+for attempt in range(20):
+    service_paths = self._service_map.get(device_path, set())
+    if service_paths and len(service_paths) > 0:
+        return  # Services verified
+    await asyncio.sleep(0.1)
+```
+
+**Impact:** Significantly reduces "service not found" connection failures on bluezero peripherals caused by BlueZ D-Bus timing issues. No performance impact (typical wait is <200ms).
+
+**User Action:** None required. Patch is automatically applied on Linux systems with Bleak installed.
+
+**File:** `src/RNS/Interfaces/linux_bluetooth_driver.py:187-246`
+
+---
+
+### LE-Only Connection via D-Bus
+
+**Platform:** Linux with BlueZ 5.49+ (experimental mode required)
+
+**Problem:** Some Bluetooth adapters are dual-mode (BR/EDR + BLE). When connecting to a BLE device, BlueZ may attempt BR/EDR connection first, causing delays or failures.
+
+**Workaround:** Use BlueZ D-Bus `ConnectDevice()` API with explicit `AddressType: "public"` parameter to force LE (Low Energy) connection:
+
+```python
+params = {
+    "Address": Variant("s", peer_address),
+    "AddressType": Variant("s", "public")  # Force LE
+}
+await adapter_iface.call_connect_device(params)
+```
+
+**Benefits:**
+- Faster connection establishment (skips BR/EDR negotiation)
+- Eliminates "connection refused" errors on BLE-only devices
+- Reduces power consumption
+
+**Requirements:**
+- BlueZ >= 5.49
+- BlueZ started with `-E` (experimental) flag: `bluetoothd -E`
+- `dbus-fast` Python library installed
+
+**User Action:**
+Ensure BlueZ is started with experimental features:
+```bash
+# Edit /lib/systemd/system/bluetooth.service
+ExecStart=/usr/lib/bluetooth/bluetoothd -E
+
+# Reload and restart
+sudo systemctl daemon-reload
+sudo systemctl restart bluetooth
+```
+
+**File:** `src/RNS/Interfaces/linux_bluetooth_driver.py:876-905`
+
+---
+
+### Three-Method MTU Negotiation Fallback
+
+**Platform:** Linux with various BlueZ versions (5.50-5.66+)
+
+**Problem:** Different BlueZ versions expose MTU through different APIs:
+- BlueZ 5.62+: MTU in characteristic properties via D-Bus
+- BlueZ 5.50-5.61: `_acquire_mtu()` method
+- BlueZ 5.48-5.49: `client.mtu_size` property only
+
+**Workaround:** Try three methods in sequence:
+
+```python
+# Method 1: BlueZ 5.62+ (D-Bus characteristic properties)
+for char in client.services.characteristics.values():
+    if "MTU" in char_props:
+        mtu = char_props["MTU"]
+
+# Method 2: BlueZ 5.50-5.61 (_acquire_mtu)
+if mtu is None:
+    await client._backend._acquire_mtu()
+    mtu = client.mtu_size
+
+# Method 3: Fallback to client.mtu_size
+if mtu is None:
+    mtu = client.mtu_size or 23  # BLE 4.0 minimum
+```
+
+**Impact:** Ensures correct MTU negotiation across all BlueZ versions, maximizing throughput.
+
+**User Action:** None required. Fallback is automatic.
+
+**File:** `src/RNS/Interfaces/linux_bluetooth_driver.py:907-946`
+
+---
+
+### Stale BLE Path Cleanup (Bug #13 Workaround)
+
+**Platform:** All platforms running Reticulum core
+
+**Problem:** Reticulum core loads path table entries from storage with `timestamp=0` or very old timestamps. This causes paths to immediately expire (stale check: `current_time - timestamp > 1800`), preventing LXMF message delivery over BLE even though peers are connected and reachable.
+
+**Root Cause:** Reticulum `Transport.py` path storage bug (GitHub Issue #13).
+
+**Workaround:** On BLE interface startup, scan `Transport.path_table` for BLE paths with:
+- `timestamp == 0` (Unix epoch bug)
+- `age > 60 seconds` (stale from previous session)
+
+Remove these stale entries, forcing fresh path discovery:
+
+```python
+for dest_hash, entry in Transport.path_table.items():
+    timestamp = entry[0]
+    interface = entry[5]
+
+    if "BLE" in str(type(interface).__name__):
+        if timestamp == 0 or (time.time() - timestamp) > 60:
+            Transport.path_table.pop(dest_hash)
+```
+
+**Impact:** Fixes LXMF message delivery failures after Reticulum restart. Paths are rediscovered via fresh announces within 30-60 seconds.
+
+**User Action:** None required. Cleanup runs automatically on interface startup.
+
+**Symptom if missing:** LXMF messages fail to route over BLE with "no known path" errors despite connected peers.
+
+**File:** `src/RNS/Interfaces/BLEInterface.py:516-571`
+
+---
+
+### Periodic Reassembly Buffer Cleanup
+
+**Platform:** All platforms
+
+**Problem:** Failed fragment transmissions leave incomplete reassembly buffers in memory indefinitely, causing memory leaks on long-running instances (critical on Raspberry Pi Zero with 512MB RAM).
+
+**Workaround:** Every 30 seconds, scan all reassemblers and delete buffers for incomplete packets older than `connection_timeout` (default 30s):
+
+```python
+def _periodic_cleanup_task(self):
+    with self.frag_lock:
+        for reassembler in self.reassemblers.values():
+            reassembler.cleanup_stale_buffers()  # Removes >30s old buffers
+```
+
+**Impact:** Prevents memory exhaustion on long-running nodes. Each stale buffer consumes ~512 bytes (for MTU=517 fragments).
+
+**User Action:** None required. Cleanup runs automatically every 30 seconds.
+
+**File:** `src/RNS/Interfaces/BLEInterface.py:572-612`
+
+---
+
+## Complete Lifecycle Sequence Diagrams
+
+This section provides comprehensive Mermaid sequence diagrams covering the entire BLE-Reticulum protocol lifecycle, from system initialization through disconnection. These diagrams illustrate both central and peripheral perspectives, data flow mechanisms, and key protocol features.
+
+### LXMF Protocol Note
+
+LXMF (Lightweight Extensible Message Format) is a higher-layer protocol that runs on top of Reticulum. From the BLE interface perspective, LXMF messages are opaque Reticulum packets. The BLE layer handles:
+- **Fragmentation** of LXMF messages based on MTU
+- **Transmission** via GATT characteristics
+- **Reassembly** at the receiver
+- **Delivery** to the Reticulum Transport layer
+
+The Transport layer then processes LXMF-specific protocol details (message headers, delivery confirmations, propagation). For complete LXMF protocol specifications, see the [LXMF documentation](https://github.com/markqvist/lxmf).
+
+---
+
+### Diagram 1: System Initialization
+
+This diagram shows the startup sequence for a BLE-Reticulum device, including GATT server/client spawning, identity loading, and advertising setup.
+
+```mermaid
+sequenceDiagram
+    participant Main as Main Thread
+    participant BLE as BLEInterface
+    participant Driver as LinuxBluetoothDriver
+    participant Transport as RNS Transport
+    participant GATT as BLEGATTServer (bluezero)
+    participant Scanner as BleakScanner
+
+    Main->>BLE: Initialize interface
+    activate BLE
+    BLE->>Driver: create LinuxBluetoothDriver()
+    activate Driver
+
+    Note over Driver: Initialize bleak + bluezero libraries
+    Driver-->>BLE: Driver ready
+
+    BLE->>Driver: start()
+    Driver-->>BLE: Started successfully
+
+    Note over BLE,Transport: Wait for Transport identity (up to 60s)
+
+    loop Every 0.1s for 60s
+        BLE->>Transport: Check if identity loaded
+        alt Identity available
+            Transport-->>BLE: Identity (16-byte hash)
+            Note over BLE: Break wait loop
+        else Still loading
+            Transport-->>BLE: None
+            Note over BLE: Wait 0.1s, retry
+        end
+    end
+
+    BLE->>BLE: Generate identity-based device name
+    Note over BLE: Format: RNS-{32-hex-identity-hash}<br/>Example: RNS-680069b61fa51cde5a751ed2396ce46d
+
+    BLE->>Driver: set_identity(identity_16_bytes)
+    Driver-->>BLE: Identity set
+
+    par Peripheral Mode Setup
+        BLE->>GATT: Create GATT server
+        activate GATT
+        Note over GATT: Register service UUID:<br/>37145b00-442d-4a94-917f-8f42c5da28e3
+
+        GATT->>GATT: Create RX characteristic (Write)
+        GATT->>GATT: Create TX characteristic (Notify)
+        GATT->>GATT: Create Identity characteristic (Read)
+
+        BLE->>GATT: start_advertising(device_name, service_uuid)
+        GATT-->>GATT: Start BlueZ advertising
+        Note over GATT: Advertisement interval: 100-200ms<br/>Discoverable by all nearby devices
+        GATT-->>BLE: Advertising active
+    and Central Mode Setup
+        BLE->>Scanner: Create BleakScanner
+        activate Scanner
+        Note over Scanner: Filter: service_uuid OR<br/>name pattern ^RNS-[0-9a-f]{32}$
+
+        BLE->>Scanner: Start background scanning
+        Scanner-->>Scanner: Scan every 5 seconds
+        Scanner-->>BLE: Scanner active
+    end
+
+    Note over BLE: Interface fully initialized<br/>Ready for discovery and connections
+
+    deactivate GATT
+    deactivate Scanner
+    deactivate Driver
+    deactivate BLE
+```
+
+**Key Points:**
+- Identity must be loaded within 60 seconds or interface fails to start
+- GATT server and scanner run concurrently (dual-mode operation)
+- Device name encodes identity for discovery without GATT reads
+- BlueZ manages advertising automatically once started
+
+---
+
+### Diagram 2: Discovery and Peer Scoring
+
+This diagram illustrates the discovery process, RSSI-based peer scoring, and connection direction determination via MAC sorting.
+
+```mermaid
+sequenceDiagram
+    participant Scanner as BleakScanner
+    participant BLE as BLEInterface
+    participant Peer as Remote Device<br/>(Advertising)
+
+    Note over Scanner: Scan cycle (every 5s)
+    Scanner->>Scanner: Start BLE scan
+
+    Peer-->>Scanner: Advertisement<br/>Service: 37145b00-...<br/>Name: RNS-680069b61fa51cde...<br/>RSSI: -45 dBm
+
+    Scanner->>BLE: on_device_discovered(address, rssi, name, service_uuids)
+
+    alt Match by service UUID
+        Note over BLE: Check if service_uuids contains<br/>37145b00-442d-4a94-917f-8f42c5da28e3
+        BLE->>BLE: Extract identity from device name
+    else Fallback: Match by name pattern
+        Note over BLE: Bluezero bug: service_uuids may be []<br/>Check name matches ^RNS-[0-9a-f]{32}$
+        BLE->>BLE: Extract 32 hex chars from name
+        BLE->>BLE: Convert to 16-byte identity
+    end
+
+    BLE->>BLE: Create/update DiscoveredPeer entry
+    Note over BLE: Store: address, identity, RSSI,<br/>last_seen, connection_history
+
+    Note over BLE: --- Peer Scoring Algorithm ---
+
+    BLE->>BLE: Calculate RSSI component (60% weight)
+    Note over BLE: Clamp RSSI to [-100, -30] dBm<br/>Map to [0, 70] points<br/>Example: -45 dBm → 55 points
+
+    BLE->>BLE: Calculate history component (30% weight)
+    Note over BLE: success_rate = successful / total_attempts<br/>Score = success_rate * 50<br/>New peers: 25 points (benefit of doubt)
+
+    BLE->>BLE: Calculate recency component (10% weight)
+    Note over BLE: Full 25 points if seen < 5s ago<br/>Linear decay to 0 over next 25s<br/>0 points if > 30s old
+
+    BLE->>BLE: Total score = RSSI + History + Recency
+    Note over BLE: Example: 55 + 25 + 25 = 105 points
+
+    BLE->>BLE: Sort all discovered peers by score
+
+    BLE->>BLE: Calculate available connection slots
+    Note over BLE: slots = max_peers - current_connections<br/>Example: max_peers=7, current=2 → 5 slots
+
+    BLE->>BLE: Select top N highest-scored peers
+
+    loop For each selected peer
+        BLE->>BLE: MAC sorting check
+        Note over BLE: my_mac_int = int(my_mac.replace(":", ""), 16)<br/>peer_mac_int = int(peer_mac.replace(":", ""), 16)
+
+        alt my_mac_int < peer_mac_int
+            Note over BLE: ✓ I have lower MAC<br/>→ I connect as CENTRAL
+            BLE->>BLE: Queue connection attempt
+        else my_mac_int > peer_mac_int
+            Note over BLE: ✗ I have higher MAC<br/>→ I wait as PERIPHERAL<br/>Peer will connect to me
+            BLE->>BLE: Skip connection (wait for peer)
+        end
+    end
+
+    Note over BLE: Discovery cycle complete<br/>Next scan in 5 seconds
+```
+
+**Peer Scoring Formula:**
+```
+Total Score (0-145 points) =
+    RSSI Component (0-70 points) +
+    History Component (0-50 points) +
+    Recency Component (0-25 points)
+
+RSSI: Clamped to [-100, -30] dBm, linearly mapped
+History: success_rate * 50, or 25 for new peers
+Recency: 25 if <5s, linear decay to 0 over 30s
+```
+
+**MAC Sorting Examples:**
+- Device A: `B8:27:EB:10:28:CD` (0xB827EB1028CD)
+- Device B: `B8:27:EB:A8:A7:22` (0xB827EBA8A722)
+- Result: A < B, so **A connects to B**
+
+---
+
+### Diagram 3: Connection Establishment (Dual Perspective)
+
+This diagram shows the complete connection sequence from both central and peripheral perspectives, including the identity handshake protocol.
+
+```mermaid
+sequenceDiagram
+    participant Central as Central (Lower MAC)<br/>B8:27:EB:10:28:CD
+    participant CDriver as Central's Driver
+    participant BLE_Link as BLE Connection
+    participant PDriver as Peripheral's Driver
+    participant Peripheral as Peripheral (Higher MAC)<br/>B8:27:EB:A8:A7:22
+
+    Note over Central: Selected peer after scoring<br/>MAC check: 0xB827EB1028CD < 0xB827EBA8A722<br/>→ I initiate connection
+
+    Central->>CDriver: connect_to_peer(address, identity)
+    activate CDriver
+
+    CDriver->>BLE_Link: BLE connection request
+    activate BLE_Link
+    BLE_Link->>PDriver: Connection incoming
+    activate PDriver
+    PDriver->>Peripheral: on_device_connected(central_address)
+    activate Peripheral
+
+    Note over Peripheral: Connection accepted<br/>Wait for identity handshake
+
+    BLE_Link-->>CDriver: Connection established
+    Note over Central,Peripheral: BLE link active, MTU negotiation in progress
+
+    CDriver->>CDriver: Wait 1.5 seconds
+    Note over CDriver: BlueZ D-Bus registration delay<br/>Prevents "service not found" errors
+
+    CDriver->>BLE_Link: Service discovery request
+    BLE_Link->>PDriver: Query GATT services
+    PDriver-->>BLE_Link: Services list
+    BLE_Link-->>CDriver: Services available
+
+    alt Reticulum service found
+        Note over CDriver: ✓ Service UUID: 37145b00-...
+        CDriver->>CDriver: Enumerate characteristics
+    else Service not found
+        Note over CDriver: ✗ Service discovery failed<br/>Log error, disconnect, record failure
+        CDriver->>BLE_Link: Disconnect
+        CDriver-->>Central: Connection failed
+    end
+
+    CDriver->>BLE_Link: Read Identity characteristic
+    BLE_Link->>PDriver: Read UUID 37145b00-...28e6
+    PDriver-->>BLE_Link: 16-byte identity
+    BLE_Link-->>CDriver: Peer identity confirmed
+
+    Note over Central: Identity matches discovery<br/>Store in address_to_identity mapping
+
+    CDriver->>BLE_Link: Subscribe to TX notifications
+    BLE_Link->>PDriver: Update CCCD (enable notify)
+    PDriver-->>BLE_Link: Notifications enabled
+    BLE_Link-->>CDriver: Subscription successful
+
+    Note over CDriver: Register notification callback
+    CDriver->>CDriver: set_notify_callback(on_data_received)
+
+    CDriver->>BLE_Link: IDENTITY HANDSHAKE<br/>Write 16 bytes to RX characteristic
+    Note over CDriver: Data: Central's 16-byte identity hash
+
+    BLE_Link->>PDriver: Write to RX characteristic (16 bytes)
+    PDriver->>Peripheral: on_data_received(central_address, 16_bytes)
+
+    Note over Peripheral: Detect handshake:<br/>len(data) == 16 AND no existing identity
+
+    Peripheral->>Peripheral: Extract central's identity
+    Peripheral->>Peripheral: Compute identity hash
+    Note over Peripheral: hash = RNS.Identity.full_hash(identity)[:16].hex()[:16]<br/>Steps: hash → first 16 bytes → hex → first 16 chars<br/>Example: "680069b61fa51cde"
+
+    Peripheral->>Peripheral: Store bidirectional mappings
+    Note over Peripheral: address_to_identity[central_addr] = identity_16_bytes<br/>identity_to_address[identity_hash] = central_addr
+
+    Peripheral->>Peripheral: Create fragmenter/reassembler
+    Note over Peripheral: Keyed by identity hash (MAC rotation immune)
+
+    Peripheral->>Peripheral: Spawn BLEPeerInterface
+    Note over Peripheral: Add to spawned_interfaces[identity_hash]<br/>Register with RNS Transport
+
+    BLE_Link-->>CDriver: Handshake write confirmed
+
+    Central->>Central: Create fragmenter/reassembler
+    Note over Central: Keyed by peer's identity hash<br/>(already known from discovery)
+
+    Central->>Central: Spawn BLEPeerInterface
+    Note over Central: Add to spawned_interfaces[identity_hash]<br/>Register with RNS Transport
+
+    CDriver->>BLE_Link: Query negotiated MTU
+    BLE_Link-->>CDriver: MTU = 517 (BLE 5.0 example)
+
+    PDriver->>PDriver: MTU from write options
+    Note over PDriver: BlueZ provides MTU in write callback
+
+    Note over Central,Peripheral: ✓ CONNECTION ESTABLISHED ✓<br/>Both sides have peer identities<br/>Fragmenters/reassemblers ready<br/>Bidirectional data flow enabled
+
+    deactivate Peripheral
+    deactivate PDriver
+    deactivate BLE_Link
+    deactivate CDriver
+```
+
+**Critical Timing:**
+- **1.5s delay** before service discovery prevents BlueZ race conditions
+- **Handshake must be first write** to RX characteristic (16 bytes exactly)
+- **MTU negotiation** happens automatically during connection
+
+**Data Structures Created:**
+
+**Central Side:**
+```python
+address_to_identity["B8:27:EB:A8:A7:22"] = b'\x68\x00\x69\xb6...'  # From discovery
+identity_to_address["680069b61fa51cde"] = "B8:27:EB:A8:A7:22"
+fragmenters["680069b61fa51cde"] = BLEFragmenter(mtu=517)
+reassemblers["680069b61fa51cde"] = BLEReassembler()
+spawned_interfaces["680069b61fa51cde"] = BLEPeerInterface(...)
+```
+
+**Peripheral Side:**
+```python
+address_to_identity["B8:27:EB:10:28:CD"] = b'\xXX\xXX...'  # From handshake
+identity_to_address["XXXXXXXXXXXXXXXX"] = "B8:27:EB:10:28:CD"
+fragmenters["XXXXXXXXXXXXXXXX"] = BLEFragmenter(mtu=517)
+reassemblers["XXXXXXXXXXXXXXXX"] = BLEReassembler()
+spawned_interfaces["XXXXXXXXXXXXXXXX"] = BLEPeerInterface(...)
+```
+
+---
+
+### Diagram 4: Data Flow - Reticulum Announces + LXMF Messages
+
+This diagram shows the complete data flow for Reticulum announces and LXMF messages, including fragmentation, transmission, and reassembly.
+
+```mermaid
+sequenceDiagram
+    participant App as LXMF Application
+    participant Transport as RNS Transport
+    participant BLE_If as BLEPeerInterface
+    participant Frag as BLEFragmenter
+    participant Driver as Driver (Central)
+    participant BLE as BLE Link
+    participant PDriver as Driver (Peripheral)
+    participant PReasm as BLEReassembler
+    participant PBle_If as BLEPeerInterface
+    participant PTransport as RNS Transport
+    participant PApp as LXMF Application
+
+    Note over Transport,PTransport: === RETICULUM ANNOUNCE (233 bytes) ===
+
+    Transport->>BLE_If: process_outgoing(announce_packet)
+    Note over Transport: 233-byte announce packet<br/>Contains: identity, public key, hops, etc.
+
+    BLE_If->>BLE_If: Look up fragmenter by identity hash
+    Note over BLE_If: Key: "680069b61fa51cde"
+
+    BLE_If->>Frag: fragment_packet(data, mtu=23)
+    activate Frag
+    Note over Frag: MTU = 23 (BLE 4.0 minimum)<br/>Payload per fragment: 18 bytes<br/>(23 - 5 fragmentation header)
+
+    Frag->>Frag: Calculate fragments needed
+    Note over Frag: 233 bytes ÷ 18 bytes = 13 fragments
+
+    loop For each fragment (13 total)
+        Frag->>Frag: Create fragment header
+        Note over Frag: [Type:1][Sequence:2][Total:2][Payload:~18]<br/>Type: 0x01=START, 0x02=CONTINUE, 0x03=END
+        Frag->>Frag: Append payload chunk
+    end
+
+    Frag-->>BLE_If: List of 13 fragments
+    deactivate Frag
+
+    loop For each fragment
+        BLE_If->>Driver: send(peer_address, fragment)
+        Note over Driver: Central role: Write to RX characteristic
+        Driver->>BLE: GATT Write (fragment)
+        BLE->>PDriver: RX characteristic written
+
+        PDriver->>PBle_If: on_data_received(address, fragment)
+        PBle_If->>PBle_If: Look up reassembler by identity hash
+        PBle_If->>PReasm: receive_fragment(fragment)
+        activate PReasm
+
+        alt Fragment type == START (0x01)
+            PReasm->>PReasm: Initialize new packet buffer
+            Note over PReasm: Reset sequence, clear buffer
+        end
+
+        PReasm->>PReasm: Validate sequence number
+        PReasm->>PReasm: Append payload to buffer
+
+        alt Fragment type == END (0x03)
+            PReasm->>PReasm: Finalize packet
+            PReasm-->>PBle_If: Complete packet (233 bytes)
+            deactivate PReasm
+
+            PBle_If->>PTransport: inbound(packet, self)
+            PTransport->>PTransport: Process announce
+            Note over PTransport: Update path table<br/>Store peer identity and reachability
+        else More fragments expected
+            PReasm-->>PBle_If: None (incomplete)
+            deactivate PReasm
+        end
+    end
+
+    Note over Transport,PTransport: === LXMF MESSAGE (847 bytes) ===
+
+    App->>App: Create LXMF message
+    Note over App: To: destination_hash<br/>Content: "Hello, mesh network!"<br/>Fields: timestamp, signature, etc.
+
+    App->>Transport: Send LXMF packet
+    Note over Transport: LXMF packet = 847 bytes<br/>(Headers + encrypted content + signature)
+
+    Transport->>BLE_If: process_outgoing(lxmf_packet)
+
+    BLE_If->>Frag: fragment_packet(data, mtu=517)
+    activate Frag
+    Note over Frag: MTU = 517 (BLE 5.0)<br/>Payload per fragment: 512 bytes<br/>(517 - 5 fragmentation header)
+
+    Frag->>Frag: Calculate fragments
+    Note over Frag: 847 bytes ÷ 512 bytes = 2 fragments<br/>Fragment 1: 512 bytes<br/>Fragment 2: 335 bytes
+
+    Frag->>Frag: Create fragment 1
+    Note over Frag: [0x01][0x00][0x02][512 bytes payload]
+
+    Frag->>Frag: Create fragment 2
+    Note over Frag: [0x03][0x01][0x02][335 bytes payload]
+
+    Frag-->>BLE_If: List of 2 fragments
+    deactivate Frag
+
+    BLE_If->>Driver: send(peer_address, fragment_1)
+    Driver->>BLE: GATT Write (fragment 1)
+    BLE->>PDriver: RX characteristic written
+    PDriver->>PReasm: receive_fragment(fragment_1)
+    activate PReasm
+    PReasm->>PReasm: Buffer fragment 1 (512 bytes)
+    PReasm-->>PDriver: None (incomplete)
+    deactivate PReasm
+
+    BLE_If->>Driver: send(peer_address, fragment_2)
+    Driver->>BLE: GATT Write (fragment 2)
+    BLE->>PDriver: RX characteristic written
+    PDriver->>PReasm: receive_fragment(fragment_2)
+    activate PReasm
+    PReasm->>PReasm: Append fragment 2 (335 bytes)
+    PReasm->>PReasm: Detect END marker (0x03)
+    PReasm-->>PDriver: Complete packet (847 bytes)
+    deactivate PReasm
+
+    PDriver->>PBle_If: Reassembled LXMF packet
+    PBle_If->>PTransport: inbound(lxmf_packet, self)
+    PTransport->>PApp: Deliver LXMF message
+
+    PApp->>PApp: Decrypt and validate message
+    Note over PApp: Verify signature<br/>Check timestamp<br/>Decrypt content
+
+    PApp->>PApp: Process message content
+    Note over PApp: Display: "Hello, mesh network!"
+
+    Note over App,PApp: === LXMF ACK (Delivery Confirmation) ===
+
+    PApp->>PApp: Generate LXMF delivery confirmation
+    Note over PApp: ACK packet: ~80 bytes<br/>Contains: message_hash, timestamp, signature
+
+    PApp->>PTransport: Send ACK packet
+
+    Note over PTransport,Transport: ACK follows reverse path<br/>(Peripheral → Central)
+
+    PTransport->>PBle_If: process_outgoing(ack_packet)
+    PBle_If->>Frag: fragment_packet(ack, mtu=517)
+    Note over Frag: 80 bytes < 512 bytes<br/>→ Single fragment (no fragmentation needed)
+
+    Frag-->>PBle_If: Single fragment [0x01+0x03][0x00][0x01][80 bytes]
+    Note over Frag: Type 0x01+0x03 = START+END (single fragment)
+
+    PBle_If->>PDriver: send(peer_address, ack_fragment)
+    Note over PDriver: Peripheral role: Notify on TX characteristic
+    PDriver->>BLE: GATT Notification (ACK)
+    BLE->>Driver: TX notification received
+
+    Driver->>BLE_If: on_data_received(address, ack_fragment)
+    BLE_If->>PReasm: receive_fragment(ack_fragment)
+    activate PReasm
+    PReasm->>PReasm: Detect single-fragment packet
+    PReasm-->>BLE_If: Complete ACK (80 bytes)
+    deactivate PReasm
+
+    BLE_If->>Transport: inbound(ack_packet, self)
+    Transport->>App: Deliver ACK
+
+    App->>App: Mark message as delivered
+    Note over App: Update UI: "Message delivered ✓"
+```
+
+**Fragment Header Format:**
+```
+Byte 0:    Type (0x01=START, 0x02=CONTINUE, 0x03=END)
+Byte 1-2:  Sequence number (0-65535, big-endian)
+Byte 3-4:  Total fragments (1-65535, big-endian)
+Byte 5+:   Payload data
+```
+
+**Fragmentation Examples:**
+
+| Packet Size | MTU | Payload/Fragment | Fragments Needed |
+|-------------|-----|------------------|------------------|
+| 233 bytes (Announce) | 23 | 18 bytes | 13 fragments |
+| 233 bytes (Announce) | 517 | 512 bytes | 1 fragment |
+| 847 bytes (LXMF) | 517 | 512 bytes | 2 fragments |
+| 80 bytes (ACK) | 517 | 512 bytes | 1 fragment |
+| 4096 bytes (Large) | 517 | 512 bytes | 8 fragments |
+
+**Transmission Roles:**
+- **Central → Peripheral:** GATT Write to RX characteristic
+- **Peripheral → Central:** GATT Notification on TX characteristic
+
+---
+
+### Diagram 5: Disconnection and Cleanup
+
+This diagram illustrates graceful disconnection, error handling, blacklisting, and resource cleanup.
+
+```mermaid
+sequenceDiagram
+    participant Central as Central Device
+    participant Driver as Driver
+    participant BLE as BLE Link
+    participant Peer as Peer Device
+
+    Note over BLE: Connection active, data flowing
+
+    alt Graceful Disconnect (Signal loss)
+        BLE->>BLE: BLE link lost (out of range)
+        BLE-->>Driver: Connection dropped event
+        Driver->>Central: on_device_disconnected(peer_address)
+    else Intentional Disconnect
+        Central->>Driver: disconnect(peer_address)
+        Driver->>BLE: Disconnect request
+        BLE->>Peer: Disconnect notification
+        BLE-->>Driver: Disconnected
+        Driver->>Central: on_device_disconnected(peer_address)
+    else Connection Failure (Error)
+        Driver->>BLE: Connection attempt
+        BLE-->>Driver: Error (timeout, auth failure, etc.)
+        Driver->>Central: on_connection_failed(peer_address, error)
+    end
+
+    activate Central
+
+    Central->>Central: Look up identity from address
+    Note over Central: identity = address_to_identity[peer_address]<br/>identity_hash = RNS.Identity.full_hash(identity)[:16].hex()[:16]
+
+    alt Connection was successful before disconnect
+        Central->>Central: Record in peer history
+        Note over Central: peer.successful_connections += 1<br/>peer.last_disconnected = time.time()
+
+        Central->>Central: Clear any blacklist entry
+        Note over Central: if peer_address in connection_blacklist:<br/>    del connection_blacklist[peer_address]
+
+    else Connection failed
+        Central->>Central: Record failure
+        Note over Central: peer.failed_connections += 1<br/>peer.last_connection_attempt = time.time()
+
+        Central->>Central: Check failure count
+        alt Failures >= 3
+            Central->>Central: Add to blacklist
+            Note over Central: Linear backoff calculation:<br/>multiplier = min(failures - 3 + 1, 8)<br/>backoff = 60 * multiplier<br/>Examples:<br/>  3 failures → 60s * 1 = 60s<br/>  4 failures → 60s * 2 = 120s<br/>  5 failures → 60s * 3 = 180s<br/>  10+ failures → 60s * 8 = 480s (capped)
+
+            Central->>Central: Store blacklist entry
+            Note over Central: connection_blacklist[peer_address] = <br/>    (blacklist_until_timestamp, failure_count)
+        end
+    end
+
+    Central->>Central: Look up spawned interface
+    Note over Central: peer_if = spawned_interfaces.get(identity_hash)
+
+    alt Peer interface exists
+        Central->>Central: Detach peer interface
+        Note over Central: peer_if.detach()<br/>Removes from Transport.interfaces
+
+        Central->>Central: Remove from spawned_interfaces
+        Note over Central: del spawned_interfaces[identity_hash]
+    end
+
+    Central->>Central: Look up fragmenter/reassembler
+
+    alt Fragmenter exists
+        Central->>Central: Delete fragmenter
+        Note over Central: del fragmenters[identity_hash]<br/>Releases packet buffers
+    end
+
+    alt Reassembler exists
+        Central->>Central: Delete reassembler
+        Note over Central: del reassemblers[identity_hash]<br/>Discards partial packets
+    end
+
+    opt Keep identity mapping for reconnection
+        Note over Central: Address-to-identity mappings may be kept<br/>to facilitate faster reconnection<br/>(optional, implementation-dependent)
+    end
+
+    Note over Central: Cleanup complete<br/>Peer can be rediscovered and reconnected
+
+    deactivate Central
+
+    Note over Central,Peer: === BACKGROUND CLEANUP TIMER (Every 30s) ===
+
+    loop Every 30 seconds
+        Central->>Central: Check reassembly buffers
+
+        loop For each sender in reassembly_buffers
+            Central->>Central: Check last fragment timestamp
+
+            alt Timestamp > 30s old
+                Central->>Central: Delete stale buffer
+                Note over Central: del reassembly_buffers[sender_id]<br/>Log warning: "Reassembly timeout"
+
+                Note over Central: Reticulum Transport will handle<br/>packet retransmission if needed
+            end
+        end
+
+        Central->>Central: Check blacklist expiry
+
+        loop For each blacklisted address
+            Central->>Central: Check blacklist_until timestamp
+
+            alt Current time > blacklist_until
+                Central->>Central: Remove from blacklist
+                Note over Central: del connection_blacklist[peer_address]<br/>Peer eligible for reconnection
+            end
+        end
+    end
+
+    Note over Central,Peer: === RECONNECTION SCENARIO ===
+
+    opt Peer rediscovered
+        Central->>Central: Discovery finds peer again
+        Note over Central: Same identity hash detected
+
+        alt Peer not blacklisted
+            Central->>Central: Attempt reconnection
+            Note over Central: MAC sorting check<br/>Connection scoring<br/>Follow Diagram 3 sequence
+
+            alt Reconnection successful
+                Central->>Central: Restore peer interface
+                Note over Central: Create new fragmenters/reassemblers<br/>Spawn new BLEPeerInterface<br/>Register with Transport
+
+                Note over Central: Data flow resumes<br/>Previous conversation context maintained<br/>(handled by higher layers)
+            end
+        else Peer blacklisted
+            Central->>Central: Skip connection attempt
+            Note over Central: Wait for blacklist to expire<br/>Log: "Peer blacklisted for Xs more"
+        end
+    end
+```
+
+**Blacklist Backoff Schedule:**
+
+| Failure Count | Backoff Duration | Multiplier | Explanation |
+|---------------|------------------|------------|-------------|
+| 1-2 | No blacklist | - | Below threshold (max_connection_failures=3) |
+| 3 | 60s (1 min) | 1×60s | First blacklist, minimum wait |
+| 4 | 120s (2 min) | 2×60s | Linear increase |
+| 5 | 180s (3 min) | 3×60s | Linear increase |
+| 6 | 240s (4 min) | 4×60s | Linear increase |
+| 7 | 300s (5 min) | 5×60s | Linear increase |
+| 8 | 360s (6 min) | 6×60s | Linear increase |
+| 9 | 420s (7 min) | 7×60s | Linear increase |
+| 10+ | 480s (8 min) | 8×60s (capped) | Maximum backoff cap |
+
+**Formula:** `backoff_duration = min(failures - max_connection_failures + 1, 8) × 60 seconds`
+
+**Cleanup Operations:**
+
+1. **Immediate cleanup** (on disconnect):
+   - Detach peer interface from Transport
+   - Delete fragmenter/reassembler (free memory)
+   - Remove from spawned_interfaces dict
+   - Optionally keep identity mappings
+
+2. **Periodic cleanup** (every 30s):
+   - Remove stale reassembly buffers (incomplete packets >30s old)
+   - Expire blacklist entries (time-based)
+   - Prevent memory leaks from abandoned connections
+   - **Critical for long-running instances:** On Raspberry Pi Zero (512MB RAM), each stale buffer consumes ~512 bytes. Without this cleanup, a week of failed transmissions could leak ~100MB of RAM.
+
+3. **Reconnection**:
+   - Same identity hash detected in discovery
+   - MAC sorting determines connection direction
+   - New fragmenters/reassemblers created
+   - Fresh peer interface spawned
+   - Transport routes packets to new interface
+
+**Memory Management Details:**
+
+The periodic cleanup task (`_periodic_cleanup_task()`) runs every 30 seconds and performs:
+- **Reassembly buffer cleanup:** Scans all reassemblers, removes buffers where the last fragment arrived >30s ago
+- **Blacklist expiry:** Removes blacklist entries where `current_time > blacklist_until`
+- **Lock ordering:** Always acquires `frag_lock` before accessing reassemblers to prevent deadlocks
+
+**Estimated memory footprint per peer:**
+- Fragmenter: ~100 bytes (state tracking)
+- Reassembler: ~100 bytes + buffer (0-512 bytes depending on partial packet)
+- Peer interface: ~200 bytes
+- **Approximate total:** ~400-800 bytes per active peer
+
+**Why it matters:**
+- 7 peers × 800 bytes = ~6KB (negligible)
+- Failed transmission stale buffers: 512 bytes each
+- Without cleanup: 100 failed transmissions/day × 512 bytes × 7 days = ~350KB leak/week
+- With cleanup: Buffers cleared every 30s, leak prevented
+
+**See Also:** Platform-Specific Workarounds → Periodic Reassembly Buffer Cleanup for implementation details.
+
+**Error Recovery:**
+- Connection failures trigger linear backoff
+- Blacklist prevents connection storms
+- Cleanup timer prevents memory leaks
+- Reticulum layer handles packet retransmission
+
+---
+
+## UUID Reference
 
 ### Service UUID
 ```
@@ -955,68 +2049,6 @@ bluetoothctl power on
 | RX (Write) | `37145b00-442d-4a94-917f-8f42c5da28e5` | WRITE, WRITE_WITHOUT_RESPONSE |
 | TX (Notify) | `37145b00-442d-4a94-917f-8f42c5da28e4` | READ, NOTIFY |
 | Identity (Read) | `37145b00-442d-4a94-917f-8f42c5da28e6` | READ |
-
----
-
-## Appendix: Sequence Diagrams
-
-### Discovery and Connection
-
-```
- Pi2 (Lower MAC)                          Pi1 (Higher MAC)
- B8:27:EB:10:28:CD                        B8:27:EB:A8:A7:22
-       |                                         |
-       | [SCAN] Scan for BLE devices             | [ADVERTISE] Broadcasting:
-       |        (scan_time=0.5s)                 |   Service: 37145b00-...
-       |                                         |   Name: RNS-680069b6...
-       |<========================================|
-       |                                         |
-       | [DISCOVER] Found peer via service UUID  |
-       |   - Name: RNS-680069b61fa51cde5a751ed23|
-       |   - RSSI: -36 dBm                       |
-       |   - Identity: 680069b61fa51cde...       |
-       |                                         |
-       | [MAC SORT] 0xB827EB1028CD < 0xB827EBA8A722
-       |   → I connect (central role)            |
-       |                                         |
-       | [CONNECT] BLE connection request        |
-       |=======================================> | [ACCEPT] Connection accepted
-       |                                         |   (peripheral role)
-       |                                         |
-       | [GATT] Service discovery                |
-       |---------------------------------------> |
-       |<--------------------------------------- | Services: Reticulum service
-       |                                         |
-       | [GATT] Read Identity characteristic     |
-       |---------------------------------------> |
-       |<--------------------------------------- | Value: 680069b61fa51cde...
-       |                                         |
-       | [GATT] Subscribe to TX notifications    |
-       |---------------------------------------> |
-       |                                         | [OK] CCCD updated
-       |                                         |
-       | [HANDSHAKE] Write 16 bytes to RX        |
-       |   Data: <Pi2's 16-byte identity>        |
-       |=======================================> | [HANDSHAKE] Detect 16-byte write
-       |                                         |   - Extract Pi2's identity
-       |                                         |   - Store: address_to_identity
-       |                                         |   - Create peer interface
-       |                                         |   - Create fragmenters
-       |                                         |
-       | [READY] Both sides have identities      | [READY]
-       |                                         |
-       | [DATA] Send announce (233 bytes)        |
-       |   → Fragment into 13 packets            |
-       |---------------------------------------> | [DATA] Receive fragments
-       |                                         |   → Reassemble to 233 bytes
-       |                                         |   → Process announce
-       |                                         |
-       | [DATA] Receive announce (233 bytes)     | [DATA] Send announce (233 bytes)
-       |   ← Reassemble from 13 notifications    |   ← Fragment into 13 packets
-       |<--------------------------------------- |
-       |   → Process announce                    |
-       |                                         |
-```
 
 ---
 
