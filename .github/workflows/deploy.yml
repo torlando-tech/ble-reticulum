@@ -1,0 +1,193 @@
+name: Deploy to Raspberry Pi
+
+on:
+  push:
+    branches: [ "*" ]
+    paths:
+      - 'src/**'
+      - '.github/workflows/deploy.yml'
+
+jobs:
+  deploy:
+    name: Deploy to Raspberry Pis
+    runs-on: self-hosted
+    needs: [unit-tests, integration-tests]
+    # Only run if tests exist and passed (skip if no Python changes detected)
+    if: always() && (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') && (needs.integration-tests.result == 'success' || needs.integration-tests.result == 'skipped')
+
+    steps:
+    - name: Validate required secrets
+      run: |
+        if [ -z "${{ secrets.PI_HOSTS }}" ]; then
+          echo "Error: PI_HOSTS secret is not set"
+          echo "Please set PI_HOSTS secret with comma-separated hostnames (e.g., 'pi1.local,pi2.local')"
+          exit 1
+        fi
+        if [ -z "${{ secrets.PI_REPO_PATH }}" ]; then
+          echo "Error: PI_REPO_PATH secret is not set"
+          echo "Please set PI_REPO_PATH secret with repository path (e.g., '/home/pi/ble-reticulum')"
+          exit 1
+        fi
+        if [ -z "${{ secrets.PI_USER }}" ]; then
+          echo "Error: PI_USER secret is not set"
+          echo "Please set PI_USER secret with SSH username (e.g., 'pi')"
+          exit 1
+        fi
+        if [ -z "${{ secrets.PI_SSH_KEY }}" ]; then
+          echo "Error: PI_SSH_KEY secret is not set"
+          echo "Please set PI_SSH_KEY secret with SSH private key for Pi access"
+          exit 1
+        fi
+        echo "All required secrets are configured"
+
+    - name: Setup SSH key
+      env:
+        PI_SSH_KEY: ${{ secrets.PI_SSH_KEY }}
+      run: |
+        # Create .ssh directory if it doesn't exist
+        mkdir -p ~/.ssh
+        chmod 700 ~/.ssh
+
+        # Write SSH private key to file
+        echo "$PI_SSH_KEY" > ~/.ssh/id_ed25519
+        chmod 600 ~/.ssh/id_ed25519
+
+        # Disable strict host key checking for known local hosts
+        cat >> ~/.ssh/config <<EOF
+        Host *.local 192.168.*
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+            LogLevel ERROR
+        EOF
+        chmod 600 ~/.ssh/config
+
+        echo "SSH key configured successfully"
+
+    - name: Deploy to Raspberry Pis
+      env:
+        PI_HOSTS: ${{ secrets.PI_HOSTS }}
+        PI_REPO_PATH: ${{ secrets.PI_REPO_PATH }}
+        PI_USER: ${{ secrets.PI_USER }}
+        BRANCH_NAME: ${{ github.ref_name }}
+      run: |
+        # Split comma-separated PI_HOSTS into array
+        IFS=',' read -ra HOSTS <<< "$PI_HOSTS"
+
+        echo "==================================="
+        echo "Deployment Configuration"
+        echo "==================================="
+        echo "Branch: $BRANCH_NAME"
+        echo "Target Pis: ${#HOSTS[@]}"
+        echo "Repository Path: $PI_REPO_PATH"
+        echo "User: $PI_USER"
+        echo "==================================="
+        echo ""
+
+        # Track deployment status
+        FAILED_HOSTS=()
+        SUCCESSFUL_HOSTS=()
+
+        # Deploy to each Pi
+        for HOST in "${HOSTS[@]}"; do
+          # Trim whitespace
+          HOST=$(echo "$HOST" | xargs)
+
+          echo ">>> Deploying to $HOST..."
+
+          # Deploy with error handling
+          if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$PI_USER@$HOST" bash <<EOF
+            set -e  # Exit on any error
+
+            echo "  [1/7] Navigating to repository..."
+            cd "$PI_REPO_PATH" || exit 1
+
+            echo "  [2/7] Fetching latest changes..."
+            git fetch --all || exit 1
+
+            echo "  [3/7] Checking out branch: $BRANCH_NAME..."
+            git checkout "$BRANCH_NAME" || exit 1
+
+            echo "  [4/7] Pulling latest code..."
+            git pull || exit 1
+
+            echo "  [5/7] Creating ~/.reticulum/interfaces directory..."
+            mkdir -p ~/.reticulum/interfaces || exit 1
+
+            echo "  [6/7] Copying interface files..."
+            cp -v src/RNS/Interfaces/*.py ~/.reticulum/interfaces/ || exit 1
+
+            echo "  [7/7] Restarting rnsd..."
+            # Try systemd first, fall back to pkill + manual start
+            if systemctl is-active --quiet rnsd 2>/dev/null; then
+              sudo systemctl restart rnsd || exit 1
+              echo "  ✓ rnsd restarted via systemd"
+            else
+              # Kill existing rnsd processes
+              pkill -9 rnsd 2>/dev/null || true
+              sleep 1
+              # Start rnsd
+              nohup rnsd > /dev/null 2>&1 &
+              sleep 2
+              # Verify rnsd is running
+              if pgrep -x rnsd > /dev/null; then
+                echo "  ✓ rnsd started successfully"
+              else
+                echo "  ✗ Failed to start rnsd"
+                exit 1
+              fi
+            fi
+
+            echo "  ✓ Deployment successful!"
+EOF
+          then
+            echo "✓ Successfully deployed to $HOST"
+            SUCCESSFUL_HOSTS+=("$HOST")
+          else
+            echo "✗ Failed to deploy to $HOST"
+            FAILED_HOSTS+=("$HOST")
+          fi
+
+          echo ""
+        done
+
+        # Print summary
+        echo "==================================="
+        echo "Deployment Summary"
+        echo "==================================="
+        echo "Successful: ${#SUCCESSFUL_HOSTS[@]}/${#HOSTS[@]}"
+        if [ ${#SUCCESSFUL_HOSTS[@]} -gt 0 ]; then
+          printf '  ✓ %s\n' "${SUCCESSFUL_HOSTS[@]}"
+        fi
+
+        if [ ${#FAILED_HOSTS[@]} -gt 0 ]; then
+          echo ""
+          echo "Failed: ${#FAILED_HOSTS[@]}/${#HOSTS[@]}"
+          printf '  ✗ %s\n' "${FAILED_HOSTS[@]}"
+          echo ""
+          echo "==================================="
+          exit 1
+        fi
+
+        echo "==================================="
+
+    - name: Cleanup SSH key
+      if: always()
+      run: |
+        # Remove SSH key for security
+        rm -f ~/.ssh/id_ed25519
+        echo "SSH key cleaned up"
+
+    - name: Deployment status
+      if: always()
+      run: |
+        echo "## Deployment Results" >> $GITHUB_STEP_SUMMARY
+        echo "- **Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Triggered by:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        if [ "${{ job.status }}" == "success" ]; then
+          echo "✓ All Raspberry Pis deployed successfully" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "✗ Deployment failed on one or more Raspberry Pis" >> $GITHUB_STEP_SUMMARY
+          echo "Check the job logs for details" >> $GITHUB_STEP_SUMMARY
+        fi
