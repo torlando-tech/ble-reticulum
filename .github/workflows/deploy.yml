@@ -94,53 +94,47 @@ jobs:
 
           echo ">>> Deploying to $HOST..."
 
-          # Deploy with error handling
-          if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$PI_USER@$HOST" \
-            PI_REPO_PATH="$PI_REPO_PATH" BRANCH_NAME="$BRANCH_NAME" bash <<'DEPLOY_SCRIPT'
-            set -e  # Exit on any error
+          # Create deployment script
+          DEPLOY_SCRIPT="set -e
+          echo '  [1/7] Navigating to repository...'
+          cd '$PI_REPO_PATH' || exit 1
 
-            echo "  [1/7] Navigating to repository..."
-            cd "$PI_REPO_PATH" || exit 1
+          echo '  [2/7] Fetching latest changes...'
+          git fetch --all || exit 1
 
-            echo "  [2/7] Fetching latest changes..."
-            git fetch --all || exit 1
+          echo '  [3/7] Checking out branch: $BRANCH_NAME...'
+          git checkout '$BRANCH_NAME' || exit 1
 
-            echo "  [3/7] Checking out branch: $BRANCH_NAME..."
-            git checkout "$BRANCH_NAME" || exit 1
+          echo '  [4/7] Pulling latest code...'
+          git pull || exit 1
 
-            echo "  [4/7] Pulling latest code..."
-            git pull || exit 1
+          echo '  [5/7] Creating ~/.reticulum/interfaces directory...'
+          mkdir -p ~/.reticulum/interfaces || exit 1
 
-            echo "  [5/7] Creating ~/.reticulum/interfaces directory..."
-            mkdir -p ~/.reticulum/interfaces || exit 1
+          echo '  [6/7] Copying interface files...'
+          cp -v src/RNS/Interfaces/*.py ~/.reticulum/interfaces/ || exit 1
 
-            echo "  [6/7] Copying interface files..."
-            cp -v src/RNS/Interfaces/*.py ~/.reticulum/interfaces/ || exit 1
-
-            echo "  [7/7] Restarting rnsd..."
-            # Try systemd first, fall back to pkill + manual start
-            if systemctl is-active --quiet rnsd 2>/dev/null; then
-              sudo systemctl restart rnsd || exit 1
-              echo "  ✓ rnsd restarted via systemd"
+          echo '  [7/7] Restarting rnsd...'
+          if systemctl is-active --quiet rnsd 2>/dev/null; then
+            sudo systemctl restart rnsd || exit 1
+            echo '  ✓ rnsd restarted via systemd'
+          else
+            pkill -9 rnsd 2>/dev/null || true
+            sleep 1
+            nohup rnsd > /dev/null 2>&1 &
+            sleep 2
+            if pgrep -x rnsd > /dev/null; then
+              echo '  ✓ rnsd started successfully'
             else
-              # Kill existing rnsd processes
-              pkill -9 rnsd 2>/dev/null || true
-              sleep 1
-              # Start rnsd
-              nohup rnsd > /dev/null 2>&1 &
-              sleep 2
-              # Verify rnsd is running
-              if pgrep -x rnsd > /dev/null; then
-                echo "  ✓ rnsd started successfully"
-              else
-                echo "  ✗ Failed to start rnsd"
-                exit 1
-              fi
+              echo '  ✗ Failed to start rnsd'
+              exit 1
             fi
+          fi
 
-            echo "  ✓ Deployment successful!"
-DEPLOY_SCRIPT
-          then
+          echo '  ✓ Deployment successful!'"
+
+          # Deploy with error handling
+          if echo "$DEPLOY_SCRIPT" | ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$PI_USER@$HOST" bash; then
             echo "✓ Successfully deployed to $HOST"
             SUCCESSFUL_HOSTS+=("$HOST")
           else
