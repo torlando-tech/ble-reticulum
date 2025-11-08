@@ -5,13 +5,14 @@ on:
     workflows: ["Tests"]
     types:
       - completed
+  workflow_dispatch:
 
 jobs:
   deploy:
     name: Deploy to Raspberry Pis
     runs-on: self-hosted
-    # Only run if tests passed or were skipped
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # Only run if tests passed (for workflow_run) or if manually triggered
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
 
     steps:
     - name: Validate required secrets
