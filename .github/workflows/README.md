@@ -66,12 +66,17 @@ pytest tests/test_fragmentation.py tests/test_prioritization.py -v \
   --cov=src/RNS/Interfaces/BLEFragmentation.py \
   --cov-report=term-missing
 
-# Integration tests
+# Integration tests (excludes v2.2 protocol tests that need full RNS)
 pytest tests/ -v -m "not hardware" \
+  --ignore=tests/test_v2_2_identity_handshake.py \
+  --ignore=tests/test_v2_2_mac_sorting.py \
+  --ignore=tests/test_v2_2_race_conditions.py \
   --cov=src/RNS/Interfaces \
   --cov-report=term-missing \
   --tb=short
 ```
+
+**Note:** The v2.2 protocol test suites (`test_v2_2_*.py`) are excluded from CI because they require the full RNS module environment. These tests document expected behavior and will run when the interface is integrated into the main Reticulum repository.
 
 ## Why Two Jobs?
 
