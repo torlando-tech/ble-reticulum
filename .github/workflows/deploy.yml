@@ -114,13 +114,14 @@ jobs:
           cp -v src/RNS/Interfaces/*.py ~/.reticulum/interfaces/ || exit 1
 
           echo '  [7/7] Restarting rnsd...'
+          RNSD_BIN=\"\$HOME/.local/bin/rnsd\"
           if systemctl is-active --quiet rnsd 2>/dev/null; then
             sudo systemctl restart rnsd || exit 1
             echo '  ✓ rnsd restarted via systemd'
           else
             pkill -9 rnsd 2>/dev/null || true
             sleep 1
-            nohup rnsd > /dev/null 2>&1 &
+            nohup \"\$RNSD_BIN\" > /dev/null 2>&1 &
             sleep 2
             if pgrep -x rnsd > /dev/null; then
               echo '  ✓ rnsd started successfully'
