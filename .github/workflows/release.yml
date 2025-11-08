@@ -1,0 +1,355 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'  # Match semantic version tags (v0.2.3, v1.0.0, etc.)
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Git tag to release (e.g., v0.2.3)'
+        required: true
+        type: string
+
+# Ensure only one release runs at a time
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  # ============================================================================
+  # JOB 1: Validate release preconditions
+  # ============================================================================
+  validate:
+    name: Validate Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for branch checks
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG=${GITHUB_REF#refs/tags/}
+          fi
+          VERSION=${TAG#v}  # Remove 'v' prefix
+
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Release version: $VERSION"
+
+      - name: Verify tag format
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: Tag must follow semantic versioning (v0.2.3, v1.0.0, etc.)"
+            echo "Got: $TAG"
+            exit 1
+          fi
+          echo "✓ Tag format is valid"
+
+      - name: Verify release is from main branch
+        run: |
+          # Get the branch that contains this tag
+          BRANCH=$(git branch -r --contains ${{ steps.version.outputs.tag }} | grep 'origin/main' || echo "")
+          if [ -z "$BRANCH" ]; then
+            echo "ERROR: Tag ${{ steps.version.outputs.tag }} is not on main branch"
+            echo "Releases must be created from main branch only"
+            exit 1
+          fi
+          echo "✓ Tag is on main branch"
+
+      - name: Verify pyproject.toml version matches tag
+        run: |
+          PYPROJECT_VERSION=$(grep '^version = ' pyproject.toml | cut -d'"' -f2)
+          TAG_VERSION="${{ steps.version.outputs.version }}"
+
+          if [ "$PYPROJECT_VERSION" != "$TAG_VERSION" ]; then
+            echo "ERROR: Version mismatch!"
+            echo "  pyproject.toml: $PYPROJECT_VERSION"
+            echo "  Git tag:        $TAG_VERSION"
+            echo ""
+            echo "Please update pyproject.toml to match the tag version"
+            exit 1
+          fi
+          echo "✓ pyproject.toml version matches tag ($PYPROJECT_VERSION)"
+
+      - name: Verify CHANGELOG.md has version entry
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          if ! grep -q "## \[$VERSION\]" CHANGELOG.md; then
+            echo "ERROR: CHANGELOG.md missing entry for version $VERSION"
+            echo ""
+            echo "Please add a changelog entry:"
+            echo "  ## [$VERSION] - $(date +%Y-%m-%d)"
+            exit 1
+          fi
+          echo "✓ CHANGELOG.md has entry for $VERSION"
+
+      - name: Verify CHANGELOG entry is not empty
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          # Extract section between this version and next version/unreleased
+          CHANGELOG_SECTION=$(sed -n "/## \[$VERSION\]/,/## \[/p" CHANGELOG.md | head -n -1)
+
+          # Remove header line and whitespace
+          CONTENT=$(echo "$CHANGELOG_SECTION" | tail -n +2 | grep -v '^[[:space:]]*$' || echo "")
+
+          if [ -z "$CONTENT" ]; then
+            echo "ERROR: CHANGELOG.md entry for $VERSION is empty"
+            echo "Please add release notes describing the changes"
+            exit 1
+          fi
+          echo "✓ CHANGELOG.md entry is not empty"
+
+      - name: Validation summary
+        run: |
+          echo "## ✅ Release Validation Passed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version**: ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Tag**: ${{ steps.version.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All preconditions met. Proceeding with release..." >> $GITHUB_STEP_SUMMARY
+
+  # ============================================================================
+  # JOB 2: Run full test suite
+  # ============================================================================
+  test:
+    name: Run Tests
+    needs: validate
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        python-version: ["3.8", "3.9", "3.10", "3.11"]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglib2.0-dev libdbus-1-dev libcairo2-dev libgirepository1.0-dev
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-asyncio pytest-cov pytest-timeout
+          pip install rns bleak bluezero dbus-python
+
+      - name: Create package structure
+        run: |
+          touch src/RNS/__init__.py
+          touch src/RNS/Interfaces/__init__.py
+
+      - name: Run tests
+        run: |
+          python -m pytest tests/ -v -m "not hardware" \
+            --ignore=tests/test_v2_2_identity_handshake.py \
+            --ignore=tests/test_v2_2_mac_sorting.py \
+            --ignore=tests/test_v2_2_race_conditions.py \
+            --cov=src/RNS/Interfaces \
+            --cov-report=term-missing \
+            --tb=short
+
+  # ============================================================================
+  # JOB 3: Build release artifacts
+  # ============================================================================
+  build:
+    name: Build Release Artifacts
+    runs-on: ubuntu-latest
+    needs: [validate, test]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Extract release notes from CHANGELOG.md
+      - name: Extract release notes
+        id: release_notes
+        run: |
+          VERSION="${{ needs.validate.outputs.version }}"
+
+          # Extract section between this version and next version
+          sed -n "/## \[$VERSION\]/,/## \[/p" CHANGELOG.md | head -n -1 | tail -n +2 > RELEASE_NOTES.md
+
+          # Add installation instructions
+          cat >> RELEASE_NOTES.md << 'EOF'
+
+          ---
+
+          ## Installation
+
+          ### Quick Install (Recommended)
+
+          ```bash
+          git clone https://github.com/torlando-tech/ble-reticulum.git
+          cd ble-reticulum
+          git checkout ${{ needs.validate.outputs.tag }}
+          chmod +x install.sh
+          ./install.sh
+          ```
+
+          ### Direct Download
+
+          ```bash
+          # Download installer
+          wget https://github.com/torlando-tech/ble-reticulum/releases/download/${{ needs.validate.outputs.tag }}/install.sh
+          chmod +x install.sh
+
+          # Download source
+          wget https://github.com/torlando-tech/ble-reticulum/releases/download/${{ needs.validate.outputs.tag }}/ble-reticulum-${{ needs.validate.outputs.version }}-source.tar.gz
+          tar xzf ble-reticulum-${{ needs.validate.outputs.version }}-source.tar.gz
+          cd ble-reticulum-${{ needs.validate.outputs.version }}
+
+          # Run installer
+          ./install.sh
+          ```
+
+          See [README.md](https://github.com/torlando-tech/ble-reticulum/blob/main/README.md) for full installation instructions.
+
+          ## Upgrading
+
+          If upgrading from a previous version:
+
+          1. Pull latest code: `git pull origin main`
+          2. Checkout this release: `git checkout ${{ needs.validate.outputs.tag }}`
+          3. Re-run installer: `./install.sh`
+          4. Restart rnsd: `sudo systemctl restart rnsd` (or `pkill rnsd && rnsd &`)
+
+          ## Verification
+
+          After installation, verify the interface is working:
+
+          ```bash
+          rnsd --verbose  # Should show BLE interface starting
+          rnstatus        # Should list BLE interface
+          ```
+
+          ## Pre-built Wheels
+
+          Pi Zero W users with Python 3.13 will automatically receive pre-built wheels (saves ~20 minutes compilation time). See the [armv6l-wheels-v1](https://github.com/torlando-tech/ble-reticulum/releases/tag/armv6l-wheels-v1) release for details.
+          EOF
+
+          echo "✓ Release notes prepared"
+
+      # Create checksums for all files we'll upload
+      - name: Generate release artifacts
+        run: |
+          VERSION="${{ needs.validate.outputs.version }}"
+          mkdir -p release-artifacts
+
+          # Copy install script
+          cp install.sh release-artifacts/install.sh
+
+          # Copy example config
+          cp examples/config_example.toml release-artifacts/config_example.toml
+
+          # Create source archive
+          git archive --format=tar.gz --prefix=ble-reticulum-$VERSION/ HEAD > release-artifacts/ble-reticulum-$VERSION-source.tar.gz
+
+          # Create checksums
+          cd release-artifacts
+          sha256sum * > SHA256SUMS.txt
+          cd ..
+
+          echo "✓ Release artifacts created"
+
+      - name: Display checksums
+        run: |
+          echo "## Release Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat release-artifacts/SHA256SUMS.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      # Upload artifacts for release job
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: release-artifacts/
+          retention-days: 5
+
+      - name: Upload release notes
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: RELEASE_NOTES.md
+          retention-days: 5
+
+  # ============================================================================
+  # JOB 4: Create GitHub Release
+  # ============================================================================
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [validate, build]
+    permissions:
+      contents: write  # Required to create releases
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+          path: release-artifacts/
+
+      - name: Download release notes
+        uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.validate.outputs.tag }}
+          name: "BLE-Reticulum ${{ needs.validate.outputs.tag }}"
+          body_path: RELEASE_NOTES.md
+          draft: false
+          prerelease: false
+          files: |
+            release-artifacts/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release summary
+        run: |
+          echo "## 🎉 Release Created!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version**: ${{ needs.validate.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "**URL**: https://github.com/${{ github.repository }}/releases/tag/${{ needs.validate.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Release Assets" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ install.sh" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ config_example.toml" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ ble-reticulum-${{ needs.validate.outputs.version }}-source.tar.gz" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ SHA256SUMS.txt" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📦 [View Release](https://github.com/${{ github.repository }}/releases/tag/${{ needs.validate.outputs.tag }})" >> $GITHUB_STEP_SUMMARY
