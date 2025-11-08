@@ -67,7 +67,7 @@ jobs:
         PI_HOSTS: ${{ secrets.PI_HOSTS }}
         PI_REPO_PATH: ${{ secrets.PI_REPO_PATH }}
         PI_USER: ${{ secrets.PI_USER }}
-        BRANCH_NAME: ${{ github.event.workflow_run.head_branch }}
+        BRANCH_NAME: ${{ github.event.workflow_run.head_branch || github.ref_name }}
       run: |
         # Split comma-separated PI_HOSTS into array
         IFS=',' read -ra HOSTS <<< "$PI_HOSTS"
