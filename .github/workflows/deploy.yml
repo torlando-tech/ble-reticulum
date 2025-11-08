@@ -95,7 +95,8 @@ jobs:
           echo ">>> Deploying to $HOST..."
 
           # Deploy with error handling
-          if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$PI_USER@$HOST" bash <<EOF
+          if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$PI_USER@$HOST" \
+            PI_REPO_PATH="$PI_REPO_PATH" BRANCH_NAME="$BRANCH_NAME" bash <<'DEPLOY_SCRIPT'
             set -e  # Exit on any error
 
             echo "  [1/7] Navigating to repository..."
@@ -138,7 +139,7 @@ jobs:
             fi
 
             echo "  ✓ Deployment successful!"
-EOF
+DEPLOY_SCRIPT
           then
             echo "✓ Successfully deployed to $HOST"
             SUCCESSFUL_HOSTS+=("$HOST")
