@@ -326,6 +326,10 @@ class LinuxBluetoothDriver(BLEDriverInterface):
         self._peers: Dict[str, PeerConnection] = {}  # address -> PeerConnection
         self._peers_lock = threading.RLock()
 
+        # Pending connections (prevents race condition from concurrent connection attempts)
+        self._connecting_peers: set = set()  # addresses with connection attempts in progress
+        self._connecting_lock = threading.Lock()
+
         # Local identity (for peripheral mode)
         self._local_identity: Optional[bytes] = None
 
@@ -691,14 +695,60 @@ class LinuxBluetoothDriver(BLEDriverInterface):
                 self._log(f"Already connected to {address}", "DEBUG")
                 return
 
+        # Check if connection already in progress
+        with self._connecting_lock:
+            if address in self._connecting_peers:
+                self._log(f"Connection already in progress to {address}", "DEBUG")
+                return
+            self._connecting_peers.add(address)
+            # Diagnostic: Log when connection attempt starts
+            self._log(f"Added {address} to connecting set (total: {len(self._connecting_peers)})", "INFO")
+
         # Check max peers
         with self._peers_lock:
             if len(self._peers) >= self.max_peers:
                 self._log(f"Cannot connect to {address}: max peers ({self.max_peers}) reached", "WARNING")
+                # Remove from connecting set since we're not actually connecting
+                with self._connecting_lock:
+                    self._connecting_peers.discard(address)
                 return
 
         # Start connection in event loop
-        asyncio.run_coroutine_threadsafe(self._connect_to_peer(address), self.loop)
+        future = asyncio.run_coroutine_threadsafe(self._connect_to_peer(address), self.loop)
+
+        # Add callback to ensure cleanup even if coroutine fails unexpectedly
+        # This guarantees cleanup on success, failure, timeout, or cancellation
+        def cleanup_connecting_state(fut):
+            """Callback to clean up connecting state when connection attempt completes."""
+            import sys
+            try:
+                # Use print as fallback in case logging fails in callback context
+                print(f"[BLE-CLEANUP] Callback invoked for {address}", file=sys.stderr, flush=True)
+
+                with self._connecting_lock:
+                    was_present = address in self._connecting_peers
+                    self._connecting_peers.discard(address)
+
+                    # Try logging, but don't fail if it doesn't work
+                    try:
+                        if was_present:
+                            self._log(f"Cleaned up connecting state for {address}", "INFO")
+                        else:
+                            # This indicates the finally block cleaned it up first
+                            print(f"[BLE-CLEANUP] {address} already cleaned by finally block", file=sys.stderr, flush=True)
+                    except Exception as log_exc:
+                        print(f"[BLE-CLEANUP] Logging failed for {address}: {log_exc}", file=sys.stderr, flush=True)
+
+            except Exception as e:
+                print(f"[BLE-CLEANUP-ERROR] Callback failed for {address}: {e}", file=sys.stderr, flush=True)
+                # Emergency cleanup
+                try:
+                    with self._connecting_lock:
+                        self._connecting_peers.discard(address)
+                except:
+                    pass
+
+        future.add_done_callback(cleanup_connecting_state)
 
     def disconnect(self, address: str):
         """Disconnect from a peer device."""
@@ -737,7 +787,7 @@ class LinuxBluetoothDriver(BLEDriverInterface):
         """Connect to a peer (runs in event loop thread)."""
         self._log(f"Connecting to {address}...", "DEBUG")
 
-        try:
+        try:  # Outer try-finally to ensure cleanup of connecting state
             # Create disconnection callback
             def disconnected_callback(client_obj):
                 """Called when device disconnects."""
@@ -880,6 +930,11 @@ class LinuxBluetoothDriver(BLEDriverInterface):
             self._log(f"Connection failed to {address}: {e}", "ERROR")
             if self.on_error:
                 self.on_error("error", f"Connection failed to {address}: {e}", e)
+        finally:
+            # Backup cleanup (primary cleanup is via Future callback in connect())
+            # This provides defense-in-depth in case the callback doesn't execute
+            with self._connecting_lock:
+                self._connecting_peers.discard(address)
 
     async def _connect_via_dbus_le(self, peer_address: str) -> bool:
         """

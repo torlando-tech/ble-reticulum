@@ -703,6 +703,11 @@ class BLEInterface(Interface):
         # Decide whether to connect based on peer scoring
         peers_to_connect = self._select_peers_to_connect()
         if device.address in [p.address for p in peers_to_connect]:
+            # Record connection attempt BEFORE calling driver.connect()
+            # This prevents rapid-fire retries if discovery callback fires again
+            if device.address in self.discovered_peers:
+                self.discovered_peers[device.address].record_connection_attempt()
+
             # Initiate connection via driver
             try:
                 self.driver.connect(device.address)
@@ -916,14 +921,39 @@ class BLEInterface(Interface):
         """
         Driver callback: Handle driver errors.
 
-        Logs errors with appropriate severity level.
+        Logs errors with appropriate severity level. Some errors are downgraded
+        to debug level if they're expected race conditions that are handled gracefully.
+
+        Also triggers blacklist mechanism for connection failures to prevent
+        infinite retry loops with MAC address randomization.
         """
-        if severity == "critical":
+        # Check for race condition errors that should be downgraded to DEBUG
+        should_blacklist = False
+        if exc and severity == "error":
+            exc_str = str(exc)
+            # "Operation already in progress" - race condition from concurrent connection attempts
+            # This should no longer happen with our fixes, but if it does, it's not a critical error
+            if "Operation already in progress" in exc_str or "In Progress" in exc_str:
+                severity = "debug"
+                log_level = RNS.LOG_DEBUG
+            # "br-connection-canceled" - BR/EDR fallback was attempted but canceled
+            # This is expected behavior when ConnectDevice() retry happens
+            elif "br-connection-canceled" in exc_str:
+                severity = "debug"
+                log_level = RNS.LOG_DEBUG
+            else:
+                log_level = RNS.LOG_ERROR
+                should_blacklist = True
+        elif severity == "critical":
             log_level = RNS.LOG_CRITICAL
         elif severity == "error":
             log_level = RNS.LOG_ERROR
+            should_blacklist = True
         elif severity == "warning":
             log_level = RNS.LOG_WARNING
+            # Connection timeouts should also trigger blacklist
+            if "Connection timeout" in message:
+                should_blacklist = True
         else:
             log_level = RNS.LOG_DEBUG
 
@@ -931,6 +961,16 @@ class BLEInterface(Interface):
             RNS.log(f"{self} driver {severity}: {message} - {type(exc).__name__}: {exc}", log_level)
         else:
             RNS.log(f"{self} driver {severity}: {message}", log_level)
+
+        # Extract address from connection failure messages and trigger blacklist
+        if should_blacklist:
+            import re
+            # Match patterns like "Connection failed to XX:XX:XX:XX:XX:XX:" or "Connection timeout to XX:XX:XX:XX:XX:XX"
+            match = re.search(r'(?:Connection (?:failed|timeout) to|to) ([0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2})', message)
+            if match:
+                address = match.group(1).upper()
+                RNS.log(f"{self} recording connection failure for {address} to activate blacklist", RNS.LOG_INFO)
+                self._record_connection_failure(address)
 
     def _score_peer(self, peer):
         """
@@ -1057,6 +1097,25 @@ class BLEInterface(Interface):
         for address, peer in self.discovered_peers.items():
             # Skip if already connected
             if address in self.peers:
+                continue
+
+            # Skip if connection is already in progress
+            if hasattr(self.driver, '_connecting_peers'):
+                with self.driver._connecting_lock:
+                    if address in self.driver._connecting_peers:
+                        # Diagnostic: Show ALL addresses currently being connected to
+                        all_connecting = list(self.driver._connecting_peers)
+                        RNS.log(f"{self} [v2.2] skipping {peer.name} ({address}) - connection already in progress",
+                                RNS.LOG_DEBUG)
+                        RNS.log(f"{self} [DIAGNOSTIC] Currently connecting to {len(all_connecting)} address(es): {all_connecting}",
+                                RNS.LOG_INFO)
+                        continue
+
+            # Rate limiting: Skip if we recently attempted connection to this peer
+            time_since_attempt = time.time() - peer.last_connection_attempt
+            if peer.last_connection_attempt > 0 and time_since_attempt < 5.0:
+                RNS.log(f"{self} [v2.2] skipping {peer.name} - connection attempted {time_since_attempt:.1f}s ago (rate limit: 5s)",
+                        RNS.LOG_DEBUG)
                 continue
 
             # Protocol v2.2: Skip if interface exists for this identity (any connection type)
