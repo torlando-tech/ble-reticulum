@@ -453,7 +453,8 @@ class TestImplementationValidation:
         assert 'def _is_blacklisted(' in code
         assert 'def _record_connection_success(' in code
         assert 'def _record_connection_failure(' in code
-        assert 'def _connect_to_peer(' in code
+        # Connection is now via driver.connect(), not _connect_to_peer()
+        assert 'self.driver.connect(' in code
 
     def test_configuration_options_exist(self):
         """Test that prioritization configuration options exist"""
