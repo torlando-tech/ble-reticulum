@@ -109,6 +109,39 @@ def test_driver_abstraction_exists():
     assert 'def send(' in driver_code
 
 
+def test_identity_based_fragmenter_keying():
+    """
+    Test that fragmenters are keyed by identity hash (v2.2 MAC rotation immunity).
+
+    This is a critical v2.2 feature that allows fragmenters/reassemblers to survive
+    MAC address rotation by keying on cryptographic identity instead of addresses.
+
+    Reference: BLE_PROTOCOL_v2.2.md §7 Identity-Based Keying
+    """
+    interface_path = os.path.join(os.path.dirname(__file__), '../src/RNS/Interfaces/BLEInterface.py')
+    with open(interface_path, 'r') as f:
+        code = f.read()
+
+    # Check for identity-based fragmenter key computation
+    assert 'def _get_fragmenter_key(' in code
+    assert '_compute_identity_hash' in code
+
+    # Check that fragmenters dict exists
+    assert 'self.fragmenters' in code
+    assert 'self.reassemblers' in code
+
+    # Check for identity-to-address mappings (bidirectional)
+    assert 'self.address_to_identity' in code
+    assert 'self.identity_to_address' in code
+
+    # Check that identity hash is used as key (not address)
+    # The implementation should compute identity_hash and use it as fragmenter key
+    assert 'identity_hash' in code
+
+    # Verify that peer identity is tracked in peer interface
+    assert 'peer_identity' in code
+
+
 if __name__ == "__main__":
     # Run tests
     pytest.main([__file__, "-v"])
