@@ -227,6 +227,7 @@ python ble_minimal_test.py test
 - Reduce `max_connections` to 3-5
 - Check for BLE/WiFi interference (both use 2.4 GHz)
 - Verify peer is within range (typically 10-30m)
+- If logs show "Operation already in progress" errors, this is handled automatically in v2.2.1+ with connection state tracking and rate limiting (see [BLE_PROTOCOL_v2.2.md](BLE_PROTOCOL_v2.2.md) § Troubleshooting for details)
 
 ### GATT server failed to start
 - Ensure BlueZ 5.x is installed: `bluetoothd --version`
@@ -336,6 +337,102 @@ pytest --cov=src/RNS/Interfaces --cov-report=html
 ```
 
 For detailed development and testing guidelines, see [CONTRIBUTING.md](CONTRIBUTING.md) and [TESTING.md](TESTING.md).
+
+## Automated Deployment
+
+The repository includes a GitHub Actions workflow for automated deployment to Raspberry Pi devices after code changes.
+
+### Setup Requirements
+
+1. **Self-hosted GitHub runner** on the same network as your Raspberry Pis
+2. **Repository cloned** on each Raspberry Pi
+3. **SSH access** configured between runner and Pis
+4. **GitHub secrets** configured for deployment
+
+### Configuring GitHub Secrets
+
+Navigate to your repository Settings → Secrets and variables → Actions, and add:
+
+| Secret | Description | Example |
+|--------|-------------|---------|
+| `PI_HOSTS` | Comma-separated list of Pi hostnames or IPs | `pi1.local,pi2.local,192.168.1.100` |
+| `PI_REPO_PATH` | Absolute path to repository on Pis | `/home/pi/ble-reticulum` |
+| `PI_USER` | SSH username for connecting to Pis | `pi` |
+| `PI_SSH_KEY` | SSH private key for authentication | `-----BEGIN OPENSSH PRIVATE KEY-----...` |
+
+### SSH Configuration
+
+**For containerized runners (k3s, Docker, etc.):**
+
+```bash
+# 1. Generate SSH key pair (on any machine)
+ssh-keygen -t ed25519 -C "github-runner-deployment" -f ~/.ssh/github_runner_deploy
+# Press Enter for no passphrase (required for automation)
+
+# 2. Copy public key to each Raspberry Pi
+ssh-copy-id -i ~/.ssh/github_runner_deploy.pub pi@pi1.local
+ssh-copy-id -i ~/.ssh/github_runner_deploy.pub pi@pi2.local
+
+# 3. Add private key to GitHub Secrets as PI_SSH_KEY
+cat ~/.ssh/github_runner_deploy
+# Copy the entire output and add to GitHub Settings → Secrets
+
+# 4. Test connection
+ssh -i ~/.ssh/github_runner_deploy pi@pi1.local 'echo "Connection successful"'
+```
+
+The workflow automatically writes the key to the container at runtime and cleans it up after deployment.
+
+### How It Works
+
+When you push code changes to any branch:
+
+1. **Tests run first**: Unit and integration tests execute on GitHub's hosted runners
+2. **Deployment triggers**: After tests pass, the deploy job runs on your self-hosted runner
+3. **For each Pi**:
+   - Git checkout and pull the pushed branch
+   - Copy `src/RNS/Interfaces/*.py` to `~/.reticulum/interfaces/`
+   - Restart `rnsd` service (via systemd or direct process management)
+4. **Status reported**: Success/failure for each Pi with summary in GitHub Actions
+
+### Monitoring Deployments
+
+View deployment status in:
+- **Actions tab**: Check workflow runs and logs
+- **Job summary**: See which Pis succeeded/failed
+- **Commit status**: Deployment status badge on commits
+
+### Troubleshooting Deployment
+
+**Deployment didn't run:**
+- Check that tests passed (deployment depends on test jobs)
+- Verify changes were in `src/**` directory or workflow file
+
+**SSH connection failed:**
+```bash
+# On self-hosted runner, test connection manually
+ssh pi@pi1.local 'echo "Test successful"'
+
+# Check DNS resolution
+ping pi1.local
+
+# Verify secrets match actual hostnames
+# Check GitHub Settings → Secrets
+```
+
+**Restart failed:**
+```bash
+# On each Pi, verify rnsd service exists
+systemctl status rnsd
+
+# Or check if rnsd is in PATH
+which rnsd
+
+# Ensure user has sudo permissions if using systemd
+sudo -l
+```
+
+For complete workflow documentation, see [.github/workflows/README.md](.github/workflows/README.md).
 
 ## Contributing
 

@@ -40,6 +40,18 @@ class DriverState(Enum):
 class BLEDriverInterface(ABC):
     """
     Abstract interface for a platform-specific BLE driver.
+
+    Driver implementations should maintain connection state tracking
+    to prevent race conditions from concurrent connection attempts:
+
+        self._connecting_peers: set = set()  # addresses with pending connections
+        self._connecting_lock: threading.Lock = threading.Lock()
+
+    The connect() method should check this set before initiating a connection,
+    and always clean up the set in a finally block to ensure proper state
+    management even on connection failures. This prevents "Operation already
+    in progress" errors when discovery callbacks trigger multiple simultaneous
+    connection attempts to the same peer.
     """
 
     # --- Callbacks ---
@@ -256,6 +268,11 @@ This tier tests your actual `BleakDriver` implementation against real hardware.
     *   **Scanning Test:** Run a script that starts the driver and prints discovered devices. Verify that it finds your other test device.
     *   **Connection Test:** Write a script to connect to the test device. Verify that the `on_device_connected` callback fires and that `driver.connected_peers` is updated.
     *   **Data I/O Test:** After connecting, use `driver.send()` to send a simple "hello world" byte string. On the other device, verify that the bytes are received correctly. Test this in both directions.
+    *   **Connection Race Condition Test:** Simulate rapid discovery callbacks for the same peer (e.g., by triggering `on_device_discovered` multiple times in quick succession). Verify that:
+        - Only one connection attempt is made (check `driver._connecting_peers` contains only one entry)
+        - No "Operation already in progress" errors appear in logs
+        - The `_connecting_peers` set is properly cleaned up after connection (success or failure)
+        - Subsequent connection attempts are properly rate-limited (5-second minimum interval)
 
 ### Tier 3: End-to-End Testing (Full Stack)
 

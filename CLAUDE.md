@@ -74,3 +74,6 @@ A Bluetooth Low Energy (BLE) interface for [Reticulum Network Stack](https://ret
 - BlueZ quirks → BLE_PROTOCOL_v2.2.md § Platform-Specific Workarounds
 
 **Common issues are documented** in the protocol spec with solutions.
+
+**Recent fixes:**
+- **Connection race conditions** ("Operation already in progress") - Fixed in v2.2.1+ with connection state tracking and 5-second rate limiting (see BLE_PROTOCOL_v2.2.md § Platform-Specific Workarounds → Connection Race Condition Prevention)
