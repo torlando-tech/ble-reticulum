@@ -1,19 +1,18 @@
 name: Deploy to Raspberry Pi
 
 on:
-  push:
+  workflow_run:
+    workflows: ["Tests"]
+    types:
+      - completed
     branches: [ "*" ]
-    paths:
-      - 'src/**'
-      - '.github/workflows/deploy.yml'
 
 jobs:
   deploy:
     name: Deploy to Raspberry Pis
     runs-on: self-hosted
-    needs: [unit-tests, integration-tests]
-    # Only run if tests exist and passed (skip if no Python changes detected)
-    if: always() && (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') && (needs.integration-tests.result == 'success' || needs.integration-tests.result == 'skipped')
+    # Only run if tests passed or were skipped
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
 
     steps:
     - name: Validate required secrets
@@ -68,7 +67,7 @@ jobs:
         PI_HOSTS: ${{ secrets.PI_HOSTS }}
         PI_REPO_PATH: ${{ secrets.PI_REPO_PATH }}
         PI_USER: ${{ secrets.PI_USER }}
-        BRANCH_NAME: ${{ github.ref_name }}
+        BRANCH_NAME: ${{ github.event.workflow_run.head_branch }}
       run: |
         # Split comma-separated PI_HOSTS into array
         IFS=',' read -ra HOSTS <<< "$PI_HOSTS"
@@ -176,9 +175,9 @@ jobs:
       if: always()
       run: |
         echo "## Deployment Results" >> $GITHUB_STEP_SUMMARY
-        echo "- **Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Triggered by:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Branch:** ${{ github.event.workflow_run.head_branch }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Commit:** ${{ github.event.workflow_run.head_sha }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Triggered by:** ${{ github.event.workflow_run.actor.login }}" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         if [ "${{ job.status }}" == "success" ]; then
           echo "✓ All Raspberry Pis deployed successfully" >> $GITHUB_STEP_SUMMARY
