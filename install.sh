@@ -379,7 +379,10 @@ mkdir -p "$INTERFACES_DIR"
 
 # Copy interface files
 print_info "Copying BLE interface files to: $INTERFACES_DIR"
-cp src/RNS/Interfaces/BLE*.py "$INTERFACES_DIR/"
+cp src/RNS/Interfaces/BLE*.py \
+   src/RNS/Interfaces/bluetooth_driver.py \
+   src/RNS/Interfaces/linux_bluetooth_driver.py \
+   "$INTERFACES_DIR/"
 
 # Create __init__.py if it doesn't exist
 if [ ! -f "$INTERFACES_DIR/__init__.py" ]; then
@@ -391,6 +394,8 @@ echo "  - BLEInterface.py"
 echo "  - BLEGATTServer.py"
 echo "  - BLEFragmentation.py"
 echo "  - BLEAgent.py"
+echo "  - bluetooth_driver.py"
+echo "  - linux_bluetooth_driver.py"
 
 echo
 
