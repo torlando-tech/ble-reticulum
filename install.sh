@@ -323,6 +323,35 @@ echo
 # Step 3: Install Python dependencies
 print_header "Installing Python Dependencies"
 
+# Download pre-built wheels for 32-bit ARM (Pi Zero W optimization)
+# Saves ~15-30 minutes of compilation time for packages with C extensions
+if [[ "$ARCH" == "armhf" ]] || [[ "$(uname -m)" =~ ^(armv6l|armv7l)$ ]]; then
+    PYTHON_VER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo "unknown")
+
+    if [[ "$PYTHON_VER" == "3.13" ]]; then
+        print_info "Python 3.13 on 32-bit ARM detected - downloading pre-built dbus_fast wheel..."
+        print_info "This saves ~20 minutes of compilation time on Pi Zero W"
+
+        WHEEL_URL="https://github.com/torlando-tech/ble-reticulum/releases/download/armv6l-wheels-v1/dbus_fast-2.44.5-cp313-cp313-linux_armv6l.whl"
+        WHEEL_FILE="/tmp/dbus_fast-armv6l-$$.whl"
+
+        if curl -sL "$WHEEL_URL" -o "$WHEEL_FILE" 2>/dev/null; then
+            if [ -f "$WHEEL_FILE" ] && [ -s "$WHEEL_FILE" ]; then
+                print_success "Pre-built dbus_fast wheel downloaded (874KB)"
+                pip_install "$WHEEL_FILE"
+                rm -f "$WHEEL_FILE"
+                print_success "dbus_fast installed from pre-built wheel"
+            else
+                print_warning "Download failed or file empty, will build from source if needed"
+                rm -f "$WHEEL_FILE"
+            fi
+        else
+            print_warning "Could not download pre-built wheel, will build from source if needed"
+        fi
+        echo
+    fi
+fi
+
 print_info "Installing pip packages (PyGObject, dbus-python, pycairo provided by system packages)"
 
 if [ "$INSTALL_MODE" = "venv" ]; then
