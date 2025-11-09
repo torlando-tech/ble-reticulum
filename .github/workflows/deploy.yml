@@ -147,7 +147,7 @@ jobs:
           else
             pkill -9 rnsd 2>/dev/null || true
             sleep 1
-            nohup \"\$RNSD_BIN\" > /dev/null 2>&1 &
+            nohup \"\$RNSD_BIN\" -s > /dev/null 2>&1 &
             sleep 2
             if pgrep -x rnsd > /dev/null; then
               echo '  ✓ rnsd started successfully'
