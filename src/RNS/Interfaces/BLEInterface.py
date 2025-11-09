@@ -104,11 +104,17 @@ try:
 except ImportError:
     from RNS.Interfaces.bluetooth_driver import BLEDriverInterface, BLEDevice
 
-# Import platform-specific driver
+# Import platform-specific driver (optional - can be overridden by subclasses)
 try:
     from linux_bluetooth_driver import LinuxBluetoothDriver
+    HAS_LINUX_DRIVER = True
 except ImportError:
-    from RNS.Interfaces.linux_bluetooth_driver import LinuxBluetoothDriver
+    try:
+        from RNS.Interfaces.linux_bluetooth_driver import LinuxBluetoothDriver
+        HAS_LINUX_DRIVER = True
+    except ImportError:
+        HAS_LINUX_DRIVER = False
+        LinuxBluetoothDriver = None
 
 HAS_DRIVER = True
 
@@ -258,6 +264,9 @@ class BLEInterface(Interface):
     FRAG_TYPE_END = 0x03
     FRAG_HEADER_SIZE = 5  # bytes: type(1) + sequence(2) + total(2)
 
+    # Platform-specific driver class (override in subclasses for different platforms)
+    driver_class = LinuxBluetoothDriver
+
     def __init__(self, owner, configuration):
         """
         Initialize BLE interface.
@@ -358,8 +367,14 @@ class BLEInterface(Interface):
 
         # Discovery state with prioritization
 
-        # Initialize BLE driver
-        self.driver = LinuxBluetoothDriver(
+        # Initialize BLE driver (uses class attribute, can be overridden by subclasses)
+        if self.driver_class is None:
+            raise ImportError(
+                "No BLE driver available. LinuxBluetoothDriver not found and no "
+                "driver_class override provided by subclass."
+            )
+
+        self.driver = self.driver_class(
             discovery_interval=self.discovery_interval,
             connection_timeout=self.connection_timeout,
             min_rssi=self.min_rssi,
@@ -367,6 +382,7 @@ class BLEInterface(Interface):
             max_peers=self.max_peers,
             adapter_index=0  # TODO: Make configurable
         )
+        RNS.log(f"{self} Using driver: {type(self.driver).__name__}", RNS.LOG_DEBUG)
 
         # Set driver callbacks
         self.driver.on_device_discovered = self._device_discovered_callback
