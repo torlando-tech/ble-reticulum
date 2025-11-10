@@ -783,15 +783,64 @@ class LinuxBluetoothDriver(BLEDriverInterface):
 
         self._log(f"Disconnected from {address}")
 
+    async def _remove_bluez_device(self, address: str) -> bool:
+        """
+        Remove stale device object from BlueZ via D-Bus.
+
+        This clears any lingering connection state that might cause
+        "Operation already in progress" errors on subsequent attempts.
+
+        Args:
+            address: MAC address of the device to remove (e.g., "AA:BB:CC:DD:EE:FF")
+
+        Returns:
+            True if device was removed successfully, False otherwise
+        """
+        if not HAS_DBUS:
+            self._log(f"Cannot remove BlueZ device {address}: D-Bus not available", "DEBUG")
+            return False
+
+        try:
+            # Convert MAC address to D-Bus path format
+            # AA:BB:CC:DD:EE:FF → /org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF
+            dev_path = f"{self.adapter_path}/dev_{address.replace(':', '_')}"
+
+            # Connect to D-Bus
+            bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+
+            # Get adapter interface
+            introspection = await bus.introspect('org.bluez', self.adapter_path)
+            adapter_obj = bus.get_proxy_object('org.bluez', self.adapter_path, introspection)
+            adapter_iface = adapter_obj.get_interface('org.bluez.Adapter1')
+
+            # Remove device
+            await adapter_iface.call_remove_device(dev_path)
+
+            self._log(f"Removed stale BlueZ device object for {address}", "DEBUG")
+            return True
+
+        except Exception as e:
+            # Device might not exist or already removed - that's fine
+            # Only log at DEBUG since this is expected in many cases
+            error_str = str(e).lower()
+            if "does not exist" in error_str or "unknownobject" in error_str:
+                self._log(f"BlueZ device {address} already removed or doesn't exist", "DEBUG")
+            else:
+                self._log(f"Could not remove BlueZ device {address}: {e}", "DEBUG")
+            return False
+
     async def _connect_to_peer(self, address: str):
         """Connect to a peer (runs in event loop thread)."""
-        self._log(f"Connecting to {address}...", "DEBUG")
+        connection_start_time = time.time()
+        self._log(f"[CONNECT-FLOW] Starting connection to {address}", "INFO")
 
         try:  # Outer try-finally to ensure cleanup of connecting state
             # Create disconnection callback
             def disconnected_callback(client_obj):
                 """Called when device disconnects."""
-                self._log(f"Device {address} disconnected unexpectedly", "WARNING")
+                # Enhanced diagnostics: Log disconnect timing and potential reason
+                connection_duration = time.time() - connection_start_time
+                self._log(f"Device {address} disconnected unexpectedly after {connection_duration:.2f}s", "WARNING")
 
                 # Clean up
                 with self._peers_lock:
@@ -824,29 +873,39 @@ class LinuxBluetoothDriver(BLEDriverInterface):
             client = BleakClient(address, disconnected_callback=disconnected_callback, timeout=self.connection_timeout)
 
             # Connect
+            connect_phase_start = time.time()
             if not le_connection_attempted:
+                self._log(f"[CONNECT-FLOW] Initiating BLE connection to {address}", "INFO")
                 await client.connect(timeout=self.connection_timeout)
             else:
                 # If ConnectDevice was used, check if already connected
                 if not client.is_connected:
+                    self._log(f"[CONNECT-FLOW] LE-specific connection active, completing BLE connection to {address}", "INFO")
                     await client.connect(timeout=self.connection_timeout)
 
             if not client.is_connected:
                 raise RuntimeError("Connection failed")
 
+            connect_duration = time.time() - connect_phase_start
+            self._log(f"[CONNECT-FLOW] BLE connection established to {address} in {connect_duration:.2f}s", "INFO")
+
             # Service discovery delay (for bluezero D-Bus registration)
             if self.service_discovery_delay > 0:
-                self._log(f"Waiting {self.service_discovery_delay}s for service discovery...", "DEBUG")
+                self._log(f"[CONNECT-FLOW] Waiting {self.service_discovery_delay}s for service discovery...", "INFO")
                 await asyncio.sleep(self.service_discovery_delay)
 
             # Discover services
+            service_discovery_start = time.time()
             services = list(client.services) if client.services else []
 
             # Fallback: force discovery if services empty
             if not services:
-                self._log("Services property empty, forcing discovery...", "DEBUG")
+                self._log(f"[CONNECT-FLOW] Services property empty, forcing discovery for {address}...", "INFO")
                 services_collection = await client.get_services()
                 services = list(services_collection)
+
+            service_discovery_duration = time.time() - service_discovery_start
+            self._log(f"[CONNECT-FLOW] Service discovery completed for {address} in {service_discovery_duration:.2f}s, found {len(services)} services", "INFO")
 
             # Find Reticulum service
             reticulum_service = None
@@ -856,20 +915,43 @@ class LinuxBluetoothDriver(BLEDriverInterface):
                     break
 
             if not reticulum_service:
-                raise RuntimeError(f"Reticulum service {self.service_uuid} not found")
+                raise RuntimeError(f"Reticulum service {self.service_uuid} not found (available services: {[s.uuid for s in services[:3]]}...)")
+
+            self._log(f"[CONNECT-FLOW] Found Reticulum service on {address}, reading identity characteristic", "INFO")
 
             # Read identity characteristic
+            identity_read_start = time.time()
             peer_identity = None
             for char in reticulum_service.characteristics:
                 if char.uuid.lower() == self.identity_char_uuid.lower():
                     identity_value = await client.read_gatt_char(char)
                     if len(identity_value) == 16:
                         peer_identity = bytes(identity_value)
-                        self._log(f"Read identity from {address}: {peer_identity.hex()}", "DEBUG")
+                        identity_read_duration = time.time() - identity_read_start
+                        self._log(f"[CONNECT-FLOW] Read identity from {address} in {identity_read_duration:.2f}s: {peer_identity.hex()}", "INFO")
+                    else:
+                        self._log(f"[CONNECT-FLOW] Invalid identity length from {address}: {len(identity_value)} bytes (expected 16)", "WARNING")
                     break
 
             if not peer_identity:
-                raise RuntimeError("Could not read peer identity")
+                raise RuntimeError(f"Could not read peer identity (identity characteristic not found or invalid)")
+
+            # Check for duplicate identity (Android MAC rotation)
+            if hasattr(self, 'on_duplicate_identity_detected') and self.on_duplicate_identity_detected:
+                try:
+                    is_duplicate = self.on_duplicate_identity_detected(address, peer_identity)
+                    if is_duplicate:
+                        self._log(f"[CONNECT-FLOW] Duplicate identity detected for {address}, aborting connection", "WARNING")
+                        # Disconnect cleanly
+                        if client.is_connected:
+                            await client.disconnect()
+                        raise RuntimeError(f"Duplicate identity - already connected via different MAC (Android MAC rotation)")
+                except RuntimeError:
+                    # Re-raise the abort exception
+                    raise
+                except Exception as e:
+                    # Log but don't fail connection if callback has issues
+                    self._log(f"[CONNECT-FLOW] Error in duplicate identity callback: {e}", "WARNING")
 
             # Negotiate MTU
             mtu = await self._negotiate_mtu(client)
@@ -889,22 +971,39 @@ class LinuxBluetoothDriver(BLEDriverInterface):
                 self._peers[address] = peer_conn
 
             # Set up notifications
+            notification_setup_start = time.time()
+            self._log(f"[CONNECT-FLOW] Starting notification setup for {address}", "INFO")
             await client.start_notify(
                 self.tx_char_uuid,
                 lambda sender, data: self._handle_notification(address, data)
             )
+            notification_setup_duration = time.time() - notification_setup_start
+            self._log(f"[CONNECT-FLOW] Notifications enabled for {address} in {notification_setup_duration:.2f}s", "INFO")
 
             # Send identity handshake (if we have local identity)
             if self._local_identity:
+                # Phase 2: Add connection state validation before handshake
+                if not client.is_connected:
+                    self._log(f"[CONNECT-FLOW] Connection to {address} lost before identity handshake, aborting", "WARNING")
+                    raise RuntimeError("Connection lost before identity handshake")
+
+                handshake_start = time.time()
+                self._log(f"[CONNECT-FLOW] Sending identity handshake to {address} ({len(self._local_identity)} bytes)", "INFO")
                 try:
                     await client.write_gatt_char(
                         self.rx_char_uuid,
                         self._local_identity,
                         response=True
                     )
-                    self._log(f"Sent identity handshake to {address}", "DEBUG")
+                    handshake_duration = time.time() - handshake_start
+                    self._log(f"[CONNECT-FLOW] Identity handshake sent to {address} in {handshake_duration:.2f}s", "INFO")
                 except Exception as e:
-                    self._log(f"Failed to send identity handshake: {e}", "WARNING")
+                    handshake_duration = time.time() - handshake_start
+                    self._log(f"[CONNECT-FLOW] Failed to send identity handshake to {address} after {handshake_duration:.2f}s: {type(e).__name__}: {e}", "WARNING")
+                    # Phase 2: Check if failure is due to disconnect
+                    if not client.is_connected:
+                        self._log(f"[CONNECT-FLOW] Connection to {address} was lost during handshake write", "WARNING")
+                    raise  # Re-raise to trigger connection failure handling
 
             # Notify callback with peer identity
             if self.on_device_connected:
@@ -920,14 +1019,52 @@ class LinuxBluetoothDriver(BLEDriverInterface):
                 except Exception as e:
                     self._log(f"Error in MTU negotiated callback: {e}", "ERROR")
 
+            total_connection_time = time.time() - connection_start_time
+            self._log(f"[CONNECT-FLOW] ✓ Connection complete to {address} (MTU: {mtu}) - Total time: {total_connection_time:.2f}s", "INFO")
             self._log(f"Connected to {address} (MTU: {mtu})")
 
         except asyncio.TimeoutError:
             self._log(f"Connection timeout to {address}", "WARNING")
+
+            # Clean up BlueZ state by explicitly disconnecting client
+            try:
+                if 'client' in locals() and client and hasattr(client, 'is_connected'):
+                    if client.is_connected:
+                        self._log(f"Disconnecting client for {address} after timeout (cleanup)", "DEBUG")
+                        await client.disconnect()
+                    else:
+                        self._log(f"Client for {address} already disconnected", "DEBUG")
+            except Exception as cleanup_e:
+                self._log(f"Error during timeout cleanup disconnect for {address}: {cleanup_e}", "DEBUG")
+
+            # Remove stale BlueZ device object to prevent "Operation already in progress" errors
+            try:
+                await self._remove_bluez_device(address)
+            except Exception as removal_e:
+                self._log(f"Error removing BlueZ device {address} after timeout: {removal_e}", "DEBUG")
+
             if self.on_error:
                 self.on_error("warning", f"Connection timeout to {address}", None)
         except Exception as e:
             self._log(f"Connection failed to {address}: {e}", "ERROR")
+
+            # Clean up BlueZ state by explicitly disconnecting client
+            try:
+                if 'client' in locals() and client and hasattr(client, 'is_connected'):
+                    if client.is_connected:
+                        self._log(f"Disconnecting client for {address} after error (cleanup)", "DEBUG")
+                        await client.disconnect()
+                    else:
+                        self._log(f"Client for {address} already disconnected", "DEBUG")
+            except Exception as cleanup_e:
+                self._log(f"Error during failure cleanup disconnect for {address}: {cleanup_e}", "DEBUG")
+
+            # Remove stale BlueZ device object to prevent "Operation already in progress" errors
+            try:
+                await self._remove_bluez_device(address)
+            except Exception as removal_e:
+                self._log(f"Error removing BlueZ device {address} after failure: {removal_e}", "DEBUG")
+
             if self.on_error:
                 self.on_error("error", f"Connection failed to {address}: {e}", e)
         finally:

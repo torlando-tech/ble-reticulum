@@ -1039,8 +1039,55 @@ rnsd --verbose
 - Ensure you're running version with race condition fix (check Platform-Specific Workarounds → Connection Race Condition Prevention)
 - Check if external BLE tools (like `bluetoothctl`) are simultaneously attempting connections
 - Verify BlueZ experimental features are enabled (`bluetoothd -E` flag)
+- **If errors persist after connection timeouts or blacklist periods**, see "BlueZ State Corruption" section below
 
 **See Also:** Platform-Specific Workarounds → Connection Race Condition Prevention for implementation details.
+
+---
+
+### Problem: "Operation already in progress" errors persisting after connection failures
+
+**Symptoms:**
+- `[org.bluez.Error.InProgress]` errors continue even after fixing race conditions
+- Peer gets blacklisted after 7 failed connection attempts
+- After blacklist expires, immediate re-failure with same "InProgress" error
+- Errors occur on connection timeouts or when peer disappears during connection
+
+**Cause:** BlueZ state corruption. When a connection attempt fails (timeout, peer disappeared, etc.), the BleakClient is abandoned without cleanup:
+1. BlueZ maintains internal connection state (thinks connection is "in progress")
+2. BlueZ device object persists in D-Bus with stale state
+3. Subsequent connection attempts hit the stale state → "InProgress" error
+4. Errors persist across blacklist periods because BlueZ state is never cleared
+
+**Fix (v2.2.2+):** Automatic BlueZ state cleanup:
+1. **Explicit client disconnect**: `client.disconnect()` called in timeout and failure handlers
+2. **D-Bus device removal**: Stale BlueZ device objects removed via `RemoveDevice()` API
+3. **Post-blacklist cleanup**: BlueZ state cleared when peer is blacklisted
+
+**Implementation Details:**
+- `linux_bluetooth_driver.py:_remove_bluez_device()` - Removes stale D-Bus device objects
+- Exception handlers call cleanup after timeouts/failures (lines 1040-1066)
+- Blacklist mechanism triggers cleanup (BLEInterface.py:1475-1490)
+
+**Manual Verification:**
+```bash
+# Check logs for cleanup messages (DEBUG level)
+grep -i "removed stale bluez device\|cleanup" ~/.reticulum/logfile
+
+# Manually remove BlueZ device if needed
+bluetoothctl remove <MAC_ADDRESS>
+
+# Restart BlueZ if state is completely corrupted
+sudo systemctl restart bluetooth
+```
+
+**Expected Behavior After Fix:**
+- Successful reconnection after temporary connection failures
+- Successful reconnection after blacklist period expires
+- No persistent "InProgress" errors across multiple connection attempts
+- BlueZ device objects automatically cleaned up on failures
+
+**See Also:** CHANGELOG.md for detailed implementation notes.
 
 ---
 

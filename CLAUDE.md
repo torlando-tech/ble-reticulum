@@ -77,3 +77,5 @@ A Bluetooth Low Energy (BLE) interface for [Reticulum Network Stack](https://ret
 
 **Recent fixes:**
 - **Connection race conditions** ("Operation already in progress") - Fixed in v2.2.1+ with connection state tracking and 5-second rate limiting (see BLE_PROTOCOL_v2.2.md § Platform-Specific Workarounds → Connection Race Condition Prevention)
+- **BlueZ state corruption** - Fixed in v2.2.2+ with explicit client disconnect on failures and BlueZ D-Bus device removal. Prevents persistent "InProgress" errors after connection timeouts/failures by cleaning up stale BlueZ device objects (see CHANGELOG.md)
+- never commit anything with my real name, tyler, in it
