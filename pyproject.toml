@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ble-reticulum"
+version = "0.1.0"
+description = "Bluetooth Low Energy (BLE) interface for Reticulum Network Stack"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "MIT"
+authors = [
+    {name = "Torlando Tech", email = "torlando-tech@users.noreply.github.com"}
+]
+keywords = ["reticulum", "bluetooth", "ble", "mesh", "networking"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications",
+    "Topic :: System :: Networking",
+]
+
+# Core package has no required dependencies
+# Reticulum is assumed to be installed separately
+dependencies = []
+
+[project.optional-dependencies]
+# Linux platform support with BlueZ
+linux = [
+    "bleak==1.1.1",
+    "bluezero>=0.9.1",
+    "dbus-python>=1.2.18",
+]
+
+# Development dependencies
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.0.0",
+    "pytest-timeout>=2.1.0",
+]
+
+# Full installation with all dependencies
+full = [
+    "ble-reticulum[linux]",
+]
+
+[project.urls]
+Homepage = "https://github.com/torlando-tech/ble-reticulum"
+Repository = "https://github.com/torlando-tech/ble-reticulum"
+Issues = "https://github.com/torlando-tech/ble-reticulum/issues"
+
+[tool.setuptools]
+packages = ["RNS.Interfaces"]
+package-dir = {"" = "src"}
+
+[tool.setuptools.package-data]
+"RNS.Interfaces" = ["*.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+addopts = "-v --tb=short"
