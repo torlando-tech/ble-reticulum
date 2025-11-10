@@ -1267,6 +1267,23 @@ class BLEInterface(Interface):
                 self.connection_blacklist[address] = (blacklist_until, peer.failed_connections)
                 RNS.log(f"{self} blacklisted {peer.name} for {blacklist_duration:.0f}s after {peer.failed_connections} failures", RNS.LOG_WARNING)
 
+                # Clean up BlueZ device state after blacklisting to prevent persistent errors
+                # This ensures that when the blacklist expires, the device can reconnect cleanly
+                if hasattr(self.driver, '_remove_bluez_device'):
+                    try:
+                        import asyncio
+                        # Run cleanup in driver's event loop with timeout
+                        future = asyncio.run_coroutine_threadsafe(
+                            self.driver._remove_bluez_device(address),
+                            self.driver.loop
+                        )
+                        # Wait up to 5 seconds for cleanup to complete
+                        cleanup_result = future.result(timeout=5.0)
+                        if cleanup_result:
+                            RNS.log(f"{self} cleaned up BlueZ device state for blacklisted peer {address}", RNS.LOG_DEBUG)
+                    except Exception as e:
+                        RNS.log(f"{self} device cleanup failed for blacklisted peer {address}: {e}", RNS.LOG_DEBUG)
+
     def _get_fragmenter_key(self, peer_identity, peer_address):
         """
         Compute fragmenter/reassembler dictionary key using full identity hash.
