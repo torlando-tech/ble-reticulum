@@ -31,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **Release workflow**: Use `gh release create` for atomic release creation to prevent asset upload failures with immutable releases. Previously, `softprops/action-gh-release` created releases and uploaded assets in separate operations, which failed when repository rules made releases immutable immediately.
 
-## [0.1.0] - 2025-11-10
+## [0.1.0] - Unreleased
 
 ### Added
 - **Installation system**
@@ -70,7 +70,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dependency resolution across different Linux distributions
 - PyGObject version conflicts on Arch Linux
 
-## [2.2.0] - 2025-11-06
+## [2.2.0] - Unreleased
 
 ### Added
 - **Protocol v2.2**: Identity-based connection management
@@ -101,7 +101,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Connection direction determined by MAC address comparison (lower MAC connects to higher)
 - Interface spawning based on peer identity (prevents duplicate interfaces for same peer)
 
-## [2.1.0] - 2024-XX-XX
+## [2.1.0] - Unreleased
 
 ### Added
 - Initial BLE interface implementation
