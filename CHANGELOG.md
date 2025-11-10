@@ -5,6 +5,11 @@ All notable changes to the BLE-Reticulum project will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2025-11-10
+
+### Fixed
+- **Release workflow**: Use `gh release create` for atomic release creation to prevent asset upload failures with immutable releases. Previously, `softprops/action-gh-release` created releases and uploaded assets in separate operations, which failed when repository rules made releases immutable immediately.
+
 ## [0.1.0] - 2025-11-10
 
 ### Added
