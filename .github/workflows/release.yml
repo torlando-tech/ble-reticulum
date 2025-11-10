@@ -326,17 +326,13 @@ jobs:
           name: release-notes
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: ${{ needs.validate.outputs.tag }}
-          name: "BLE-Reticulum ${{ needs.validate.outputs.tag }}"
-          body_path: RELEASE_NOTES.md
-          draft: false
-          prerelease: false
-          files: |
-            release-artifacts/*
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ needs.validate.outputs.tag }}" \
+            release-artifacts/* \
+            --title "BLE-Reticulum ${{ needs.validate.outputs.tag }}" \
+            --notes-file RELEASE_NOTES.md
 
       - name: Release summary
         run: |
