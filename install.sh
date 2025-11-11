@@ -739,6 +739,82 @@ fi
 
 echo
 
+# Step 5C: BlueZ LE-Only Mode Configuration
+print_header "BlueZ LE-Only Mode Configuration"
+
+if ! command -v bluetoothctl &> /dev/null; then
+    print_warning "bluetoothctl not found - skipping LE-only mode configuration"
+    echo
+elif [ ! -f /etc/bluetooth/main.conf ]; then
+    print_warning "/etc/bluetooth/main.conf not found - BlueZ config file missing"
+    echo
+else
+    print_info "Configuring BlueZ adapter for LE-only mode (BLE-only, no BR/EDR Classic)"
+    print_info "This prevents 'br-connection-profile-unavailable' errors on dual-mode hardware"
+    echo
+
+    # Check if ControllerMode is already set to 'le'
+    if grep -q "^[[:space:]]*ControllerMode[[:space:]]*=[[:space:]]*le" /etc/bluetooth/main.conf 2>/dev/null; then
+        print_success "ControllerMode already set to 'le' in /etc/bluetooth/main.conf"
+        echo
+    else
+        print_info "Adding ControllerMode = le to /etc/bluetooth/main.conf..."
+
+        # Create backup
+        BACKUP_FILE="/etc/bluetooth/main.conf.backup.$(date +%Y%m%d_%H%M%S)"
+        if sudo cp /etc/bluetooth/main.conf "$BACKUP_FILE" 2>/dev/null; then
+            print_success "Created backup: $BACKUP_FILE"
+        else
+            print_warning "Could not create backup (continuing anyway)"
+        fi
+
+        # Check if [General] section exists
+        if grep -q "^\[General\]" /etc/bluetooth/main.conf 2>/dev/null; then
+            # [General] section exists - add ControllerMode after it
+            # First, check if ControllerMode is commented out or set to something else
+            if grep -q "^[[:space:]]*#[[:space:]]*ControllerMode" /etc/bluetooth/main.conf 2>/dev/null; then
+                # Commented out - uncomment and set to le
+                sudo sed -i 's/^[[:space:]]*#[[:space:]]*ControllerMode[[:space:]]*=.*/ControllerMode = le/' /etc/bluetooth/main.conf
+                print_success "Uncommented and set ControllerMode = le"
+            elif grep -q "^[[:space:]]*ControllerMode[[:space:]]*=" /etc/bluetooth/main.conf 2>/dev/null; then
+                # Already exists but set to different value - update it
+                sudo sed -i 's/^[[:space:]]*ControllerMode[[:space:]]*=.*/ControllerMode = le/' /etc/bluetooth/main.conf
+                print_success "Updated existing ControllerMode to 'le'"
+            else
+                # Doesn't exist - add it after [General]
+                sudo sed -i '/^\[General\]/a ControllerMode = le' /etc/bluetooth/main.conf
+                print_success "Added ControllerMode = le under [General] section"
+            fi
+        else
+            # No [General] section - add both section and setting at end
+            echo "" | sudo tee -a /etc/bluetooth/main.conf > /dev/null
+            echo "[General]" | sudo tee -a /etc/bluetooth/main.conf > /dev/null
+            echo "ControllerMode = le" | sudo tee -a /etc/bluetooth/main.conf > /dev/null
+            print_success "Added [General] section with ControllerMode = le"
+        fi
+
+        echo
+        print_info "Restarting BlueZ service to apply changes..."
+        if sudo systemctl restart bluetooth 2>/dev/null || sudo service bluetooth restart 2>/dev/null; then
+            print_success "BlueZ service restarted successfully"
+            sleep 2  # Give BlueZ time to reinitialize
+
+            # Verify the setting was applied
+            if grep -q "^[[:space:]]*ControllerMode[[:space:]]*=[[:space:]]*le" /etc/bluetooth/main.conf 2>/dev/null; then
+                print_success "ControllerMode = le configuration verified"
+            else
+                print_warning "Could not verify ControllerMode setting - check manually"
+            fi
+        else
+            print_error "Failed to restart BlueZ service"
+            print_info "You may need to restart manually: sudo systemctl restart bluetooth"
+        fi
+        echo
+    fi
+fi
+
+echo
+
 # Step 6: Configuration
 print_header "Configuration"
 
