@@ -1373,6 +1373,25 @@ sudo systemctl restart bluetooth
 
 **File:** `src/RNS/Interfaces/linux_bluetooth_driver.py:876-905`
 
+**ConnectDevice() Return Value (v2.2.3+):**
+
+The `ConnectDevice()` D-Bus method returns an object path (signature 'o') indicating the device object created for the connection. This is normal behavior and indicates success:
+
+```python
+result = await adapter_iface.call_connect_device(params)
+# result = "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF" (object path)
+```
+
+**Important:** The object path return should be treated as success, not an error. Some BlueZ versions may return an error like "br-connection-profile-unavailable" when BR/EDR profile is unavailable, but this is expected for BLE-only connections - the LE connection still succeeds.
+
+**What This Fixes (v2.2.3+):**
+- Clarifies that object path return is success, not error
+- Logs the object path for debugging visibility
+- Prevents confusion from "profile unavailable" error messages
+- Confirms that LE connection was successfully initiated
+
+**File:** `src/RNS/Interfaces/linux_bluetooth_driver.py:1121-1132`
+
 ---
 
 ### Three-Method MTU Negotiation Fallback

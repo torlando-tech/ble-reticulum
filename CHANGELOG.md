@@ -37,6 +37,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Files: `src/RNS/Interfaces/linux_bluetooth_driver.py` (lines 539-551, 586-588)
   - Tests: `tests/test_scanner_connection_coordination.py`
 
+- **BR/EDR fallback - clarify ConnectDevice() object path return as success**
+  - Modified `_connect_via_dbus_le()` to capture and log object path returned by ConnectDevice()
+  - Object path (D-Bus signature 'o') indicates successful LE connection initiation
+  - Prevents confusion from "br-connection-profile-unavailable" error messages
+  - Some BlueZ versions report BR/EDR profile unavailable while LE connection succeeds - this is expected
+  - Improved logging shows object path for debugging visibility
+  - Clarifies that object path return means success, not error
+  - Files: `src/RNS/Interfaces/linux_bluetooth_driver.py` (lines 1121-1132)
+  - Tests: `tests/test_breddr_fallback_prevention.py`
+
 ## [0.1.1] - 2025-11-10
 
 ### Fixed
