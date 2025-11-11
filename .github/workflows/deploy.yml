@@ -121,32 +121,42 @@ jobs:
 
           # Deployment script
           DEPLOY_SCRIPT="set -e
-          echo '  [1/7] Navigating to repository...'
+          echo '  [1/8] Navigating to repository...'
           cd '$PI_REPO_PATH' || exit 1
 
-          echo '  [2/7] Fetching latest changes...'
+          echo '  [2/8] Fetching latest changes...'
           git fetch --all || exit 1
 
-          echo '  [3/7] Checking out branch: $BRANCH_NAME...'
+          echo '  [3/8] Checking out branch: $BRANCH_NAME...'
           git checkout '$BRANCH_NAME' || exit 1
 
-          echo '  [4/7] Pulling latest code...'
+          echo '  [4/8] Pulling latest code...'
           git pull || exit 1
 
-          echo '  [5/7] Creating ~/.reticulum/interfaces directory...'
+          echo '  [5/8] Creating ~/.reticulum/interfaces directory...'
           mkdir -p ~/.reticulum/interfaces || exit 1
 
-          echo '  [6/7] Copying interface files...'
+          echo '  [6/8] Copying interface files...'
           cp -v src/RNS/Interfaces/*.py ~/.reticulum/interfaces/ || exit 1
 
-          echo '  [7/7] Restarting rnsd...'
+          echo '  [7/8] Stopping rnsd and clearing logs...'
           RNSD_BIN=\"\$HOME/.local/bin/rnsd\"
           if systemctl is-active --quiet rnsd 2>/dev/null; then
-            sudo systemctl restart rnsd || exit 1
-            echo '  ✓ rnsd restarted via systemd'
+            sudo systemctl stop rnsd || exit 1
+            echo '  ✓ rnsd stopped via systemd'
           else
             pkill -9 rnsd 2>/dev/null || true
             sleep 1
+          fi
+          # Clear the log file for clean validation
+          echo '' > ~/.reticulum/logfile
+          echo '  ✓ Log file cleared'
+
+          echo '  [8/8] Starting rnsd...'
+          if systemctl is-active --quiet rnsd.service 2>/dev/null || systemctl is-enabled --quiet rnsd.service 2>/dev/null; then
+            sudo systemctl start rnsd || exit 1
+            echo '  ✓ rnsd started via systemd'
+          else
             nohup \"\$RNSD_BIN\" -s > /dev/null 2>&1 &
             sleep 2
             if pgrep -x rnsd > /dev/null; then
@@ -231,19 +241,19 @@ jobs:
           # Retry 3 times with 3s delay
           SUCCESS=false
           for attempt in 1 2 3; do
-            RECENT_LOGS=$(tail -100 "$LOG_FILE" 2>/dev/null || echo "")
+            STARTUP_LOGS=$(head -200 "$LOG_FILE" 2>/dev/null || echo "")
 
             # Check for critical errors
-            if echo "$RECENT_LOGS" | grep -qE "(failed to start driver|Timeout waiting for Transport)"; then
+            if echo "$STARTUP_LOGS" | grep -qE "(failed to start driver|Timeout waiting for Transport)"; then
               echo "  ✗ BLE driver/identity error detected"
               echo ""
-              echo "  Recent error logs:"
-              tail -30 "$LOG_FILE" | grep -E "(BLE|ERROR)"
+              echo "  Startup error logs:"
+              head -100 "$LOG_FILE" | grep -E "(BLE|ERROR)"
               exit 1
             fi
 
             # Check for success
-            if echo "$RECENT_LOGS" | grep -q "interface online"; then
+            if echo "$STARTUP_LOGS" | grep -q "interface online"; then
               echo "  ✓ BLE interface online"
               SUCCESS=true
               break
@@ -258,8 +268,8 @@ jobs:
           if [ "$SUCCESS" = false ]; then
             echo "  ✗ Interface did not come online after 3 attempts"
             echo ""
-            echo "  Recent logs:"
-            tail -30 "$LOG_FILE" | grep -E "(BLE|ERROR|WARNING)"
+            echo "  Startup logs:"
+            head -100 "$LOG_FILE" | grep -E "(BLE|ERROR|WARNING)"
             exit 1
           fi
 
