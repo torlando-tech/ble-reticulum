@@ -354,6 +354,9 @@ class LinuxBluetoothDriver(BLEDriverInterface):
         # Logging
         self.log_prefix = "LinuxBLEDriver"
 
+        # Scanner health tracking
+        self.consecutive_empty_scans = 0
+
         # Apply BlueZ timing patch
         apply_bluez_services_resolved_patch()
 
@@ -588,9 +591,11 @@ class LinuxBluetoothDriver(BLEDriverInterface):
             return  # Skip this scan cycle, will retry on next loop iteration
 
         discovered_devices = []
+        callback_count = [0]  # Use list to allow modification in nested function
 
         def detection_callback(device, advertisement_data):
             """Called for each discovered device."""
+            callback_count[0] += 1
             self._log(f"🔍 CALLBACK INVOKED: {device.address} ({device.name or 'Unknown'}) RSSI={advertisement_data.rssi} UUIDs={advertisement_data.service_uuids}", "EXTRA")
             discovered_devices.append((device, advertisement_data))
 
@@ -625,6 +630,27 @@ class LinuxBluetoothDriver(BLEDriverInterface):
                 return
             else:
                 raise
+
+        # Detect scanner callback corruption
+        if callback_count[0] == 0:
+            self.consecutive_empty_scans += 1
+            self._log(f"⚠️ Scanner corruption detected: 0 callbacks after {scan_time}s scan (streak: {self.consecutive_empty_scans})", "WARNING")
+
+            if self.consecutive_empty_scans >= 3:
+                self._log("⚠️ CRITICAL: Bleak scanner callbacks not firing", "ERROR")
+                self._log("⚠️ Bluetooth/BlueZ/D-Bus state is corrupted", "ERROR")
+                self._log("⚠️ System reboot required to restore BLE scanning", "ERROR")
+
+                if self.on_error:
+                    self.on_error("critical",
+                        f"Scanner callback failure detected (0 callbacks for {self.consecutive_empty_scans} consecutive scans). "
+                        "Bluetooth stack requires reboot.",
+                        Exception("BleakScanner callbacks not invoked"))
+        else:
+            # Reset counter on successful callback
+            if self.consecutive_empty_scans > 0:
+                self._log(f"✓ Scanner callbacks resumed after {self.consecutive_empty_scans} empty scans", "INFO")
+            self.consecutive_empty_scans = 0
 
         # Process discovered devices
         self._log(f"🔍 Processing {len(discovered_devices)} discovered devices", "EXTRA")
