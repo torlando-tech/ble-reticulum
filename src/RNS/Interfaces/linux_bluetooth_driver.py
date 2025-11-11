@@ -591,6 +591,7 @@ class LinuxBluetoothDriver(BLEDriverInterface):
 
         def detection_callback(device, advertisement_data):
             """Called for each discovered device."""
+            self._log(f"🔍 CALLBACK INVOKED: {device.address} ({device.name or 'Unknown'}) RSSI={advertisement_data.rssi} UUIDs={advertisement_data.service_uuids}", "EXTRA")
             discovered_devices.append((device, advertisement_data))
 
         # Scan duration based on power mode
@@ -601,14 +602,20 @@ class LinuxBluetoothDriver(BLEDriverInterface):
         else:  # balanced
             scan_time = 1.0
 
+        self._log(f"🔍 Starting BleakScanner (power_mode={self.power_mode}, scan_time={scan_time}s, service_uuid={self.service_uuid})", "EXTRA")
         scanner = BleakScanner(detection_callback=detection_callback)
 
         try:
+            self._log("🔍 Calling scanner.start()", "EXTRA")
             await scanner.start()
+            self._log(f"🔍 Scanner started, sleeping for {scan_time}s", "EXTRA")
             await asyncio.sleep(scan_time)
+            self._log("🔍 Calling scanner.stop()", "EXTRA")
             await scanner.stop()
+            self._log(f"🔍 Scanner stopped. Total devices discovered: {len(discovered_devices)}", "EXTRA")
         except Exception as e:
             error_msg = str(e)
+            self._log(f"🔍 Scanner exception: {error_msg}", "ERROR")
 
             # Check for adapter power issues
             if "No powered Bluetooth adapters" in error_msg or "Not Powered" in error_msg:
@@ -620,12 +627,23 @@ class LinuxBluetoothDriver(BLEDriverInterface):
                 raise
 
         # Process discovered devices
+        self._log(f"🔍 Processing {len(discovered_devices)} discovered devices", "EXTRA")
         for device, adv_data in discovered_devices:
             # Check if device advertises our service UUID
             if self.service_uuid and self.service_uuid.lower() in [uuid.lower() for uuid in adv_data.service_uuids]:
+                self._log(f"✓ {device.address} has service UUID {self.service_uuid}", "EXTRA")
+
                 # Check RSSI threshold
                 if adv_data.rssi < self.min_rssi:
+                    self._log(f"✗ {device.address}: RSSI {adv_data.rssi} below threshold {self.min_rssi}", "EXTRA")
                     continue
+
+                # Check for invalid/sentinel RSSI values (-127, -128 indicate no signal/error)
+                if adv_data.rssi in (-127, -128, 0):
+                    self._log(f"✗ {device.address}: invalid sentinel RSSI {adv_data.rssi} dBm", "DEBUG")
+                    continue
+
+                self._log(f"✓ {device.address} passed all filters, notifying callback", "EXTRA")
 
                 # Create BLEDevice and notify callback
                 ble_device = BLEDevice(
@@ -641,6 +659,8 @@ class LinuxBluetoothDriver(BLEDriverInterface):
                         self.on_device_discovered(ble_device)
                     except Exception as e:
                         self._log(f"Error in device discovered callback: {e}", "ERROR")
+            else:
+                self._log(f"✗ {device.address} ({device.name or 'Unknown'}): service UUID mismatch (has {adv_data.service_uuids}, want {self.service_uuid})", "EXTRA")
 
     # ========================================================================
     # Advertising (Peripheral Mode)

@@ -695,6 +695,11 @@ class BLEInterface(Interface):
             RNS.log(f"{self} device {device.name if device.name else device.address} does not advertise Reticulum service UUID, skipping", RNS.LOG_EXTREME)
             return
 
+        # Validate RSSI - skip devices with invalid/sentinel values
+        if device.rssi in (-127, -128, 0):
+            RNS.log(f"{self} skipping {device.name or device.address} ({device.address}): invalid sentinel RSSI {device.rssi} dBm", RNS.LOG_DEBUG)
+            return
+
         # Update or create discovered peer entry
         if device.address not in self.discovered_peers:
             self.discovered_peers[device.address] = DiscoveredPeer(
@@ -1036,6 +1041,11 @@ class BLEInterface(Interface):
                   - Poor peer: 0 (RSSI) + 0 (history) + 0 (old) = 0
         """
         score = 0.0
+
+        # Validate RSSI - reject peers with invalid/sentinel values
+        if peer.rssi is None or peer.rssi in (-127, -128, 0):
+            RNS.log(f"{self} peer {peer.address} has invalid RSSI {peer.rssi}, returning minimum score", RNS.LOG_DEBUG)
+            return 0.0
 
         # Signal strength component (0-100 points)
         # RSSI typically ranges from -30 (excellent) to -100 (poor)
