@@ -1091,6 +1091,61 @@ sudo systemctl restart bluetooth
 
 ---
 
+### Problem: "Operation already in progress" errors during scanning
+
+**Symptoms:**
+- `[org.bluez.Error.InProgress]` errors in scan loop
+- Errors occur when scanner.start() is called during active connection attempts
+- Log messages: "Error in scan loop: [org.bluez.Error.InProgress] Operation already in progress"
+- Scanner continues to work after error, but causes connection failures
+
+**Cause:** Scanner interference with active connections. BlueZ cannot start a new scan operation when connection attempts are in progress:
+1. Driver initiates connection to peer (peer added to `_connecting_peers`)
+2. Scanner loop continues running on its own schedule
+3. Scanner calls `BleakScanner.start()` while connection is active
+4. BlueZ rejects scan start → "InProgress" error
+5. This can also cause the connection attempt to fail
+
+**Fix (v2.2.3+):** Scanner-connection coordination:
+1. **Connection state tracking**: `_connecting_peers` set tracks active connections
+2. **Pause check**: New `_should_pause_scanning()` method checks if connections are in progress
+3. **Scan skip**: `_perform_scan()` skips scan cycle when connections are active
+4. **Automatic resume**: Scanner automatically resumes when connections complete
+
+**Implementation Details:**
+- `linux_bluetooth_driver.py:_should_pause_scanning()` - Checks for active connections (line 539)
+- `linux_bluetooth_driver.py:_perform_scan()` - Skips scan if connections in progress (lines 586-588)
+- Scanner loop continues running, just skips scan operations temporarily
+- No need to stop/start scanner thread, just skip individual scan operations
+
+**Manual Verification:**
+```bash
+# Check logs for scanner coordination (DEBUG level)
+grep -i "pausing scan" ~/.reticulum/logfile
+
+# Look for absence of scan loop errors
+grep "Error in scan loop.*InProgress" ~/.reticulum/logfile
+```
+
+**Expected Behavior After Fix:**
+- No "InProgress" errors in scan loop
+- Scanner automatically pauses during connections
+- Scanner automatically resumes after connections complete
+- Connection success rate improves (no scanner interference)
+- Log shows "Pausing scan: connection(s) in progress" at DEBUG level
+
+**Why This Matters:**
+- Prevents scan-induced connection failures
+- Improves overall connection reliability
+- Reduces BlueZ error log spam
+- Scanner and connections coordinate cleanly
+
+**See Also:**
+- Platform-Specific Workarounds → Connection Race Condition Prevention
+- test_scanner_connection_coordination.py for test coverage
+
+---
+
 ## Configuration Reference
 
 This section documents all configuration parameters available for the BLE interface. These are set in the Reticulum configuration file (e.g., `~/.reticulum/config`).
