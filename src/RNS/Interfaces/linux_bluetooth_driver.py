@@ -536,6 +536,20 @@ class LinuxBluetoothDriver(BLEDriverInterface):
         if not self._advertising:
             self._state = DriverState.IDLE
 
+    def _should_pause_scanning(self) -> bool:
+        """
+        Check if scanning should be paused due to active connections.
+
+        Scanner interference with active connections can cause BlueZ
+        "Operation already in progress" errors. We pause scanning when
+        connections are being established.
+
+        Returns:
+            True if scanning should be paused (connections in progress)
+            False if scanning can proceed normally
+        """
+        return len(self._connecting_peers) > 0
+
     async def _scan_loop(self):
         """Main scanning loop (runs in event loop thread)."""
         self._log("Scan loop started", "DEBUG")
@@ -567,6 +581,12 @@ class LinuxBluetoothDriver(BLEDriverInterface):
 
     async def _perform_scan(self):
         """Perform a single BLE scan."""
+        # Check if we should pause scanning due to active connections
+        # This prevents "Operation already in progress" errors from BlueZ
+        if self._should_pause_scanning():
+            self._log("Pausing scan: connection(s) in progress", "DEBUG")
+            return  # Skip this scan cycle, will retry on next loop iteration
+
         discovered_devices = []
 
         def detection_callback(device, advertisement_data):

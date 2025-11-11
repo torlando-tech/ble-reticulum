@@ -26,6 +26,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Fixes issue where devices could not reconnect after multiple failed attempts due to corrupted BlueZ state
   - Files: `src/RNS/Interfaces/linux_bluetooth_driver.py` (lines 786-830, 980-1069), `src/RNS/Interfaces/BLEInterface.py` (lines 1475-1490)
 
+- **Scanner interference causing "Operation already in progress" errors during connection attempts**
+  - Added `_should_pause_scanning()` method to check for active connections before starting scanner
+  - Modified `_perform_scan()` to skip scan cycle when connections are in progress
+  - Scanner automatically pauses when `_connecting_peers` is not empty
+  - Scanner automatically resumes when connections complete
+  - Prevents BlueZ "InProgress" errors from scanner.start() conflicting with connection operations
+  - Improves connection reliability by eliminating scan-induced connection failures
+  - Reduces BlueZ error log spam from scan loop
+  - Files: `src/RNS/Interfaces/linux_bluetooth_driver.py` (lines 539-551, 586-588)
+  - Tests: `tests/test_scanner_connection_coordination.py`
+
 ## [0.1.1] - 2025-11-10
 
 ### Fixed
