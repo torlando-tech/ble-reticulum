@@ -47,6 +47,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Files: `src/RNS/Interfaces/linux_bluetooth_driver.py` (lines 1121-1132)
   - Tests: `tests/test_breddr_fallback_prevention.py`
 
+- **GATT server initialization race causing "Reticulum service not found" errors**
+  - Added `_verify_services_on_dbus()` method to poll D-Bus for service availability after server start
+  - Fixed race condition where `started_event` fires before `peripheral.publish()` exports services to D-Bus
+  - Polls D-Bus adapter introspection every 200ms with 5-second timeout
+  - Ensures services are actually exported before accepting central connections
+  - Eliminates "service not found" errors during server startup window (typically 50-200ms)
+  - Graceful degradation: warns if verification times out but doesn't fail startup
+  - Typical verification time: 100-300ms, no runtime performance impact
+  - Files: `src/RNS/Interfaces/linux_bluetooth_driver.py` (lines 1493-1559, 1527-1538)
+  - Tests: `tests/test_gatt_server_readiness.py`
+
 ## [0.1.1] - 2025-11-10
 
 ### Fixed
