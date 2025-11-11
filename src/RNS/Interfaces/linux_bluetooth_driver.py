@@ -1118,9 +1118,16 @@ class LinuxBluetoothDriver(BLEDriverInterface):
             "AddressType": Variant("s", "public")  # Force LE public address
         }
 
-        await adapter_iface.call_connect_device(params)
+        # ConnectDevice() returns a D-Bus object path (signature 'o')
+        # This is normal/expected - the object path indicates successful connection initiation
+        result = await adapter_iface.call_connect_device(params)
 
-        self._log(f"ConnectDevice() succeeded for {peer_address}", "DEBUG")
+        # Log the object path for debugging
+        if result:
+            self._log(f"ConnectDevice() succeeded for {peer_address}, got object path: {result}", "DEBUG")
+        else:
+            self._log(f"ConnectDevice() succeeded for {peer_address}", "DEBUG")
+
         self.has_connect_device = True
         return True
 
