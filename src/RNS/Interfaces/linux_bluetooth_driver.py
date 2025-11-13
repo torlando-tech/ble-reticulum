@@ -121,8 +121,35 @@ import asyncio
 import threading
 import time
 import logging
+import warnings
 from typing import Optional, Callable, List, Dict
 from dataclasses import dataclass
+
+# Import RNS for logging
+try:
+    import RNS
+except ImportError:
+    # Fallback for when RNS is not available (standalone testing)
+    RNS = None
+
+# Capture Python warnings and route them through RNS logger
+def _rns_showwarning(message, category, filename, lineno, file=None, line=None):
+    """Custom warning handler that routes warnings to RNS logger."""
+    if RNS:
+        warning_msg = f"{category.__name__}: {message} ({filename}:{lineno})"
+        RNS.log(warning_msg, RNS.LOG_WARNING)
+    else:
+        # Fallback to default warning behavior
+        import sys
+        if file is None:
+            file = sys.stderr
+        try:
+            file.write(warnings.formatwarning(message, category, filename, lineno, line))
+        except (AttributeError, IOError):
+            pass
+
+# Install custom warning handler
+warnings.showwarning = _rns_showwarning
 
 # Import the abstraction
 try:
@@ -222,7 +249,8 @@ def apply_bluez_services_resolved_patch():
                         first_service_path = next(iter(service_paths))
                         if first_service_path in self._properties:
                             # Success: Services are actually in D-Bus
-                            logging.debug(f"BlueZ timing fix: Services verified in D-Bus after {attempt * retry_delay:.2f}s")
+                            if RNS:
+                                RNS.log(f"BlueZ timing fix: Services verified in D-Bus after {attempt * retry_delay:.2f}s", RNS.LOG_EXTREME)
                             return
                     except (StopIteration, KeyError):
                         pass  # Service not ready yet
@@ -233,16 +261,19 @@ def apply_bluez_services_resolved_patch():
 
             # If we get here, services didn't appear within timeout
             # Log warning but don't raise - let get_services() handle it
-            logging.warning(f"BlueZ timing fix: Services not found in D-Bus after {max_attempts * retry_delay}s, proceeding anyway")
+            if RNS:
+                RNS.log(f"BlueZ timing fix: Services not found in D-Bus after {max_attempts * retry_delay}s, proceeding anyway", RNS.LOG_WARNING)
 
         # Apply the patch
         BlueZManager._wait_for_services_discovery = _patched_wait_for_services_discovery
-        logging.info("Applied Bleak BlueZ ServicesResolved timing patch for bluezero compatibility")
+        if RNS:
+            RNS.log("Applied Bleak BlueZ ServicesResolved timing patch for bluezero compatibility", RNS.LOG_INFO)
         return True
 
     except Exception as e:
         # If patching fails, log warning but don't prevent driver from loading
-        logging.warning(f"Failed to apply Bleak BlueZ timing patch: {e}. Connections to bluezero peripherals may fail.")
+        if RNS:
+            RNS.log(f"Failed to apply Bleak BlueZ timing patch: {e}. Connections to bluezero peripherals may fail.", RNS.LOG_WARNING)
         return False
 
 
@@ -365,8 +396,22 @@ class LinuxBluetoothDriver(BLEDriverInterface):
 
     def _log(self, message: str, level: str = "INFO"):
         """Log message with appropriate level."""
-        log_func = getattr(logging, level.lower(), logging.info)
-        log_func(f"{self.log_prefix} {message}")
+        if RNS:
+            # Map Python logging level strings to RNS log levels
+            level_map = {
+                "DEBUG": RNS.LOG_DEBUG,
+                "INFO": RNS.LOG_INFO,
+                "WARNING": RNS.LOG_WARNING,
+                "ERROR": RNS.LOG_ERROR,
+                "CRITICAL": RNS.LOG_CRITICAL,
+                "EXTREME": RNS.LOG_EXTREME,
+            }
+            rns_level = level_map.get(level.upper(), RNS.LOG_INFO)
+            RNS.log(f"{self.log_prefix} {message}", rns_level)
+        else:
+            # Fallback to standard Python logging if RNS not available
+            log_func = getattr(logging, level.lower(), logging.info)
+            log_func(f"{self.log_prefix} {message}")
 
     # ========================================================================
     # Lifecycle & Configuration
@@ -788,8 +833,8 @@ class LinuxBluetoothDriver(BLEDriverInterface):
             """Callback to clean up connecting state when connection attempt completes."""
             import sys
             try:
-                # Use print as fallback in case logging fails in callback context
-                print(f"[BLE-CLEANUP] Callback invoked for {address}", file=sys.stderr, flush=True)
+                if RNS:
+                    RNS.log(f"{self.log_prefix} [BLE-CLEANUP] Callback invoked for {address}", RNS.LOG_EXTREME)
 
                 with self._connecting_lock:
                     was_present = address in self._connecting_peers
@@ -801,12 +846,15 @@ class LinuxBluetoothDriver(BLEDriverInterface):
                             self._log(f"Cleaned up connecting state for {address}", "INFO")
                         else:
                             # This indicates the finally block cleaned it up first
-                            print(f"[BLE-CLEANUP] {address} already cleaned by finally block", file=sys.stderr, flush=True)
+                            if RNS:
+                                RNS.log(f"{self.log_prefix} [BLE-CLEANUP] {address} already cleaned by finally block", RNS.LOG_EXTREME)
                     except Exception as log_exc:
-                        print(f"[BLE-CLEANUP] Logging failed for {address}: {log_exc}", file=sys.stderr, flush=True)
+                        if RNS:
+                            RNS.log(f"{self.log_prefix} [BLE-CLEANUP] Logging failed for {address}: {log_exc}", RNS.LOG_EXTREME)
 
             except Exception as e:
-                print(f"[BLE-CLEANUP-ERROR] Callback failed for {address}: {e}", file=sys.stderr, flush=True)
+                if RNS:
+                    RNS.log(f"{self.log_prefix} [BLE-CLEANUP-ERROR] Callback failed for {address}: {e}", RNS.LOG_EXTREME)
                 # Emergency cleanup
                 try:
                     with self._connecting_lock:
@@ -964,9 +1012,17 @@ class LinuxBluetoothDriver(BLEDriverInterface):
                     self._log(f"ConnectDevice() method not available: {e}", "WARNING")
                     self.has_connect_device = False
                 except Exception as e:
-                    # ConnectDevice exists but failed - retry on next connection
-                    self._log(f"ConnectDevice() failed (will retry): {e}", "WARNING")
-                    # Don't set has_connect_device to False - allow retry
+                    # Check if this is a successful object path return (D-Bus signature 'o')
+                    # dbus_fast raises exception with "unexpected signature: 'o'" when ConnectDevice
+                    # succeeds and returns the device object path - this is normal/expected behavior
+                    error_str = str(e)
+                    if 'unexpected signature' in error_str.lower() and "'o'" in error_str:
+                        le_connection_attempted = True
+                        self._log(f"LE-specific connection initiated for {address} (object path returned)", "INFO")
+                    else:
+                        # Actual failure - log and retry on next connection
+                        self._log(f"ConnectDevice() failed (will retry): {e}", "WARNING")
+                        # Don't set has_connect_device to False - allow retry
 
             # Create BleakClient
             client = BleakClient(address, disconnected_callback=disconnected_callback, timeout=self.connection_timeout)
@@ -1664,7 +1720,8 @@ class BluezeroGATTServer:
         import sys
 
         if not HAS_DBUS:
-            print("[GATT-MONITOR] D-Bus not available, disconnect monitoring disabled", file=sys.stderr, flush=True)
+            if RNS:
+                RNS.log(f"{self.log_prefix} [GATT-MONITOR] D-Bus not available, disconnect monitoring disabled", RNS.LOG_EXTREME)
             self._log("D-Bus not available, disconnect monitoring disabled", "WARNING")
             return
 
@@ -1672,30 +1729,36 @@ class BluezeroGATTServer:
         from dbus_fast.aio import MessageBus
         from dbus_fast import BusType
 
-        print("[GATT-MONITOR] Starting D-Bus disconnect monitoring thread...", file=sys.stderr, flush=True)
+        if RNS:
+            RNS.log(f"{self.log_prefix} [GATT-MONITOR] Starting D-Bus disconnect monitoring thread...", RNS.LOG_EXTREME)
         self._log("Starting D-Bus disconnect monitoring thread...", "DEBUG")
 
         async def monitor_loop():
             """Async loop that monitors D-Bus signals using ObjectManager."""
             import sys
-            print("[GATT-MONITOR] Entered monitor_loop()", file=sys.stderr, flush=True)
+            if RNS:
+                RNS.log(f"{self.log_prefix} [GATT-MONITOR] Entered monitor_loop()", RNS.LOG_EXTREME)
 
             bus = None
             device_proxies = {}  # Track proxy objects for each device
 
             try:
                 # Connect to system bus
-                print("[GATT-MONITOR] Connecting to D-Bus...", file=sys.stderr, flush=True)
+                if RNS:
+                    RNS.log(f"{self.log_prefix} [GATT-MONITOR] Connecting to D-Bus...", RNS.LOG_EXTREME)
                 bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
-                print("[GATT-MONITOR] Connected to D-Bus successfully", file=sys.stderr, flush=True)
+                if RNS:
+                    RNS.log(f"{self.log_prefix} [GATT-MONITOR] Connected to D-Bus successfully", RNS.LOG_EXTREME)
                 self._log("Connected to D-Bus for disconnect monitoring", "DEBUG")
 
                 # Get ObjectManager for BlueZ to discover all devices
-                print("[GATT-MONITOR] Getting ObjectManager introspection...", file=sys.stderr, flush=True)
+                if RNS:
+                    RNS.log(f"{self.log_prefix} [GATT-MONITOR] Getting ObjectManager introspection...", RNS.LOG_EXTREME)
                 introspection = await bus.introspect("org.bluez", "/")
                 obj = bus.get_proxy_object("org.bluez", "/", introspection)
                 object_manager = obj.get_interface("org.freedesktop.DBus.ObjectManager")
-                print("[GATT-MONITOR] ObjectManager interface acquired", file=sys.stderr, flush=True)
+                if RNS:
+                    RNS.log(f"{self.log_prefix} [GATT-MONITOR] ObjectManager interface acquired", RNS.LOG_EXTREME)
 
                 def handle_properties_changed(interface_name, changed_properties, invalidated_properties, device_path):
                     """Handle PropertiesChanged signal from a specific device."""
@@ -1716,19 +1779,22 @@ class BluezeroGATTServer:
                                     mac_with_underscores = device_path.split("/dev_")[-1]
                                     mac_address = mac_with_underscores.replace("_", ":")
 
-                                    print(f"[GATT-MONITOR] D-Bus: Device {mac_address} disconnected", file=sys.stderr, flush=True)
+                                    if RNS:
+                                        RNS.log(f"{self.log_prefix} [GATT-MONITOR] D-Bus: Device {mac_address} disconnected", RNS.LOG_EXTREME)
                                     self._log(f"D-Bus: Device {mac_address} disconnected", "DEBUG")
 
                                     # Check if this was a connected central
                                     with self.centrals_lock:
                                         if mac_address in self.connected_centrals:
-                                            print(f"[GATT-MONITOR] Detected central disconnect: {mac_address}", file=sys.stderr, flush=True)
+                                            if RNS:
+                                                RNS.log(f"{self.log_prefix} [GATT-MONITOR] Detected central disconnect: {mac_address}", RNS.LOG_EXTREME)
                                             self._log(f"Detected central disconnect via D-Bus: {mac_address}", "INFO")
                                             # Call disconnect handler
                                             self._handle_central_disconnected(mac_address)
 
                     except Exception as e:
-                        print(f"[GATT-MONITOR] Error in PropertiesChanged handler: {e}", file=sys.stderr, flush=True)
+                        if RNS:
+                            RNS.log(f"{self.log_prefix} [GATT-MONITOR] Error in PropertiesChanged handler: {e}", RNS.LOG_EXTREME)
                         self._log(f"Error in D-Bus signal handler: {e}", "ERROR")
                         import traceback
                         traceback.print_exc(file=sys.stderr)
@@ -1740,7 +1806,8 @@ class BluezeroGATTServer:
                         if device_path in device_proxies:
                             return
 
-                        print(f"[GATT-MONITOR] Subscribing to device: {device_path}", file=sys.stderr, flush=True)
+                        if RNS:
+                            RNS.log(f"{self.log_prefix} [GATT-MONITOR] Subscribing to device: {device_path}", RNS.LOG_EXTREME)
 
                         # Get device proxy
                         device_introspection = await bus.introspect("org.bluez", device_path)
@@ -1757,43 +1824,53 @@ class BluezeroGATTServer:
                             )
                         )
 
-                        print(f"[GATT-MONITOR] Subscribed to device {device_path}", file=sys.stderr, flush=True)
+                        if RNS:
+                            RNS.log(f"{self.log_prefix} [GATT-MONITOR] Subscribed to device {device_path}", RNS.LOG_EXTREME)
 
                     except Exception as e:
-                        print(f"[GATT-MONITOR] Error subscribing to device {device_path}: {e}", file=sys.stderr, flush=True)
+                        if RNS:
+                            RNS.log(f"{self.log_prefix} [GATT-MONITOR] Error subscribing to device {device_path}: {e}", RNS.LOG_EXTREME)
                         self._log(f"Error subscribing to device {device_path}: {e}", "WARNING")
 
                 def on_interfaces_added(path, interfaces):
                     """Handle new devices being added to BlueZ."""
                     try:
                         if "org.bluez.Device1" in interfaces:
-                            print(f"[GATT-MONITOR] New device added: {path}", file=sys.stderr, flush=True)
+                            if RNS:
+                                RNS.log(f"{self.log_prefix} [GATT-MONITOR] New device added: {path}", RNS.LOG_EXTREME)
                             # Schedule subscription in the event loop
                             asyncio.create_task(subscribe_to_device(path))
                     except Exception as e:
-                        print(f"[GATT-MONITOR] Error in InterfacesAdded handler: {e}", file=sys.stderr, flush=True)
+                        if RNS:
+                            RNS.log(f"{self.log_prefix} [GATT-MONITOR] Error in InterfacesAdded handler: {e}", RNS.LOG_EXTREME)
 
                 def on_interfaces_removed(path, interfaces):
                     """Handle devices being removed from BlueZ."""
                     try:
                         if "org.bluez.Device1" in interfaces:
-                            print(f"[GATT-MONITOR] Device removed: {path}", file=sys.stderr, flush=True)
+                            if RNS:
+                                RNS.log(f"{self.log_prefix} [GATT-MONITOR] Device removed: {path}", RNS.LOG_EXTREME)
                             # Clean up proxy
                             if path in device_proxies:
                                 del device_proxies[path]
                     except Exception as e:
-                        print(f"[GATT-MONITOR] Error in InterfacesRemoved handler: {e}", file=sys.stderr, flush=True)
+                        if RNS:
+                            RNS.log(f"{self.log_prefix} [GATT-MONITOR] Error in InterfacesRemoved handler: {e}", RNS.LOG_EXTREME)
 
                 # Subscribe to device additions/removals
-                print("[GATT-MONITOR] Setting up ObjectManager signal handlers...", file=sys.stderr, flush=True)
+                if RNS:
+                    RNS.log(f"{self.log_prefix} [GATT-MONITOR] Setting up ObjectManager signal handlers...", RNS.LOG_EXTREME)
                 object_manager.on_interfaces_added(on_interfaces_added)
                 object_manager.on_interfaces_removed(on_interfaces_removed)
-                print("[GATT-MONITOR] ObjectManager handlers configured", file=sys.stderr, flush=True)
+                if RNS:
+                    RNS.log(f"{self.log_prefix} [GATT-MONITOR] ObjectManager handlers configured", RNS.LOG_EXTREME)
 
                 # Get existing devices and subscribe to them
-                print("[GATT-MONITOR] Getting existing managed objects...", file=sys.stderr, flush=True)
+                if RNS:
+                    RNS.log(f"{self.log_prefix} [GATT-MONITOR] Getting existing managed objects...", RNS.LOG_EXTREME)
                 managed_objects = await object_manager.call_get_managed_objects()
-                print(f"[GATT-MONITOR] Found {len(managed_objects)} managed objects", file=sys.stderr, flush=True)
+                if RNS:
+                    RNS.log(f"{self.log_prefix} [GATT-MONITOR] Found {len(managed_objects)} managed objects", RNS.LOG_EXTREME)
 
                 device_count = 0
                 for path, interfaces in managed_objects.items():
@@ -1801,21 +1878,25 @@ class BluezeroGATTServer:
                         device_count += 1
                         await subscribe_to_device(path)
 
-                print(f"[GATT-MONITOR] Subscribed to {device_count} existing devices", file=sys.stderr, flush=True)
+                if RNS:
+                    RNS.log(f"{self.log_prefix} [GATT-MONITOR] Subscribed to {device_count} existing devices", RNS.LOG_EXTREME)
                 self._log(f"D-Bus monitoring active for {device_count} devices", "DEBUG")
 
                 # Keep the event loop running
-                print("[GATT-MONITOR] Entering wait loop...", file=sys.stderr, flush=True)
+                if RNS:
+                    RNS.log(f"{self.log_prefix} [GATT-MONITOR] Entering wait loop...", RNS.LOG_EXTREME)
 
                 # Poll stop_event and yield to event loop to process D-Bus messages
                 while not self.stop_event.is_set():
                     await asyncio.sleep(0.5)
 
-                print("[GATT-MONITOR] Stop event set, exiting loop", file=sys.stderr, flush=True)
+                if RNS:
+                    RNS.log(f"{self.log_prefix} [GATT-MONITOR] Stop event set, exiting loop", RNS.LOG_EXTREME)
                 self._log("D-Bus monitoring loop exiting", "DEBUG")
 
             except Exception as e:
-                print(f"[GATT-MONITOR] EXCEPTION in monitoring loop: {e}", file=sys.stderr, flush=True)
+                if RNS:
+                    RNS.log(f"{self.log_prefix} [GATT-MONITOR] EXCEPTION in monitoring loop: {e}", RNS.LOG_EXTREME)
                 self._log(f"Error in D-Bus monitoring loop: {e}", "ERROR")
                 import traceback
                 traceback.print_exc(file=sys.stderr)
@@ -1825,21 +1906,25 @@ class BluezeroGATTServer:
                 if bus:
                     try:
                         bus.disconnect()
-                        print("[GATT-MONITOR] D-Bus connection closed", file=sys.stderr, flush=True)
+                        if RNS:
+                            RNS.log(f"{self.log_prefix} [GATT-MONITOR] D-Bus connection closed", RNS.LOG_EXTREME)
                     except:
                         pass
 
         # Run the async monitoring loop
         try:
-            print("[GATT-MONITOR] Calling asyncio.run(monitor_loop())", file=sys.stderr, flush=True)
+            if RNS:
+                RNS.log(f"{self.log_prefix} [GATT-MONITOR] Calling asyncio.run(monitor_loop())", RNS.LOG_EXTREME)
             asyncio.run(monitor_loop())
         except Exception as e:
-            print(f"[GATT-MONITOR] Thread exception: {e}", file=sys.stderr, flush=True)
+            if RNS:
+                RNS.log(f"{self.log_prefix} [GATT-MONITOR] Thread exception: {e}", RNS.LOG_EXTREME)
             self._log(f"D-Bus monitoring thread error: {e}", "ERROR")
             import traceback
             traceback.print_exc(file=sys.stderr)
 
-        print("[GATT-MONITOR] Thread exited", file=sys.stderr, flush=True)
+        if RNS:
+            RNS.log(f"{self.log_prefix} [GATT-MONITOR] Thread exited", RNS.LOG_EXTREME)
         self._log("D-Bus disconnect monitoring thread exited", "DEBUG")
 
     def _poll_stale_connections(self):
@@ -1859,14 +1944,16 @@ class BluezeroGATTServer:
         import sys
         import time
 
-        print("[STALE-POLL] Starting stale connection polling thread...", file=sys.stderr, flush=True)
+        if RNS:
+            RNS.log(f"{self.log_prefix} [STALE-POLL] Starting stale connection polling thread...", RNS.LOG_EXTREME)
         self._log("Starting stale connection polling", "DEBUG")
 
         # Import at function level to avoid issues if not available
         try:
             import dbus
         except ImportError:
-            print("[STALE-POLL] dbus-python not available, polling disabled", file=sys.stderr, flush=True)
+            if RNS:
+                RNS.log(f"{self.log_prefix} [STALE-POLL] dbus-python not available, polling disabled", RNS.LOG_EXTREME)
             self._log("dbus-python not available, stale connection polling disabled", "WARNING")
             return
 
@@ -1888,7 +1975,8 @@ class BluezeroGATTServer:
                 if not centrals_to_check:
                     continue
 
-                print(f"[STALE-POLL] Checking {len(centrals_to_check)} centrals...", file=sys.stderr, flush=True)
+                if RNS:
+                    RNS.log(f"{self.log_prefix} [STALE-POLL] Checking {len(centrals_to_check)} centrals...", RNS.LOG_EXTREME)
 
                 # Connect to D-Bus and check each device
                 try:
@@ -1908,7 +1996,8 @@ class BluezeroGATTServer:
 
                             if not is_connected:
                                 # Device shows as disconnected in BlueZ but we still have it tracked
-                                print(f"[STALE-POLL] Detected stale connection: {mac_address}", file=sys.stderr, flush=True)
+                                if RNS:
+                                    RNS.log(f"{self.log_prefix} [STALE-POLL] Detected stale connection: {mac_address}", RNS.LOG_EXTREME)
                                 self._log(f"Polling detected stale connection: {mac_address}", "INFO")
 
                                 # Trigger cleanup
@@ -1919,7 +2008,8 @@ class BluezeroGATTServer:
                         except dbus.exceptions.DBusException as e:
                             # Device might not exist in BlueZ anymore
                             if "UnknownObject" in str(e) or "UnknownMethod" in str(e):
-                                print(f"[STALE-POLL] Device {mac_address} no longer in BlueZ, cleaning up", file=sys.stderr, flush=True)
+                                if RNS:
+                                    RNS.log(f"{self.log_prefix} [STALE-POLL] Device {mac_address} no longer in BlueZ, cleaning up", RNS.LOG_EXTREME)
                                 self._log(f"Device {mac_address} no longer in BlueZ", "DEBUG")
 
                                 # Trigger cleanup
@@ -1928,25 +2018,30 @@ class BluezeroGATTServer:
                                         self._handle_central_disconnected(mac_address)
                             else:
                                 # Other D-Bus error, log but don't cleanup
-                                print(f"[STALE-POLL] D-Bus error checking {mac_address}: {e}", file=sys.stderr, flush=True)
+                                if RNS:
+                                    RNS.log(f"{self.log_prefix} [STALE-POLL] D-Bus error checking {mac_address}: {e}", RNS.LOG_EXTREME)
 
                 except Exception as e:
-                    print(f"[STALE-POLL] Error during polling cycle: {e}", file=sys.stderr, flush=True)
+                    if RNS:
+                        RNS.log(f"{self.log_prefix} [STALE-POLL] Error during polling cycle: {e}", RNS.LOG_EXTREME)
                     self._log(f"Error in stale connection polling: {e}", "WARNING")
 
             except Exception as e:
-                print(f"[STALE-POLL] Unexpected error: {e}", file=sys.stderr, flush=True)
+                if RNS:
+                    RNS.log(f"{self.log_prefix} [STALE-POLL] Unexpected error: {e}", RNS.LOG_EXTREME)
                 self._log(f"Unexpected error in polling thread: {e}", "ERROR")
                 import traceback
                 traceback.print_exc(file=sys.stderr)
 
-        print("[STALE-POLL] Thread exited", file=sys.stderr, flush=True)
+        if RNS:
+            RNS.log(f"{self.log_prefix} [STALE-POLL] Thread exited", RNS.LOG_EXTREME)
         self._log("Stale connection polling thread exited", "DEBUG")
 
     def start(self, device_name: Optional[str]):
         """Start GATT server and advertising."""
         import sys
-        print(f"[GATT-MONITOR] BluezeroGATTServer.start() called, device_name={device_name}", file=sys.stderr, flush=True)
+        if RNS:
+            RNS.log(f"{self.log_prefix} [GATT-MONITOR] BluezeroGATTServer.start() called, device_name={device_name}", RNS.LOG_EXTREME)
 
         if self.running:
             self._log("Server already running", "WARNING")
@@ -1994,31 +2089,38 @@ class BluezeroGATTServer:
 
         # Start D-Bus disconnect monitoring thread
         import sys
-        print(f"[GATT-MONITOR] About to start monitoring thread, HAS_DBUS={HAS_DBUS}", file=sys.stderr, flush=True)
+        if RNS:
+            RNS.log(f"{self.log_prefix} [GATT-MONITOR] About to start monitoring thread, HAS_DBUS={HAS_DBUS}", RNS.LOG_EXTREME)
         if HAS_DBUS:
-            print("[GATT-MONITOR] Creating thread...", file=sys.stderr, flush=True)
+            if RNS:
+                RNS.log(f"{self.log_prefix} [GATT-MONITOR] Creating thread...", RNS.LOG_EXTREME)
             self.disconnect_monitor_thread = threading.Thread(
                 target=self._monitor_device_disconnections,
                 daemon=True,
                 name="dbus-disconnect-monitor"
             )
-            print("[GATT-MONITOR] Starting thread...", file=sys.stderr, flush=True)
+            if RNS:
+                RNS.log(f"{self.log_prefix} [GATT-MONITOR] Starting thread...", RNS.LOG_EXTREME)
             self.disconnect_monitor_thread.start()
-            print("[GATT-MONITOR] Thread started successfully", file=sys.stderr, flush=True)
+            if RNS:
+                RNS.log(f"{self.log_prefix} [GATT-MONITOR] Thread started successfully", RNS.LOG_EXTREME)
             self._log("D-Bus disconnect monitoring started", "DEBUG")
         else:
-            print(f"[GATT-MONITOR] HAS_DBUS is False, skipping", file=sys.stderr, flush=True)
+            if RNS:
+                RNS.log(f"{self.log_prefix} [GATT-MONITOR] HAS_DBUS is False, skipping", RNS.LOG_EXTREME)
             self._log("D-Bus not available, disconnect monitoring disabled", "WARNING")
 
         # Start stale connection polling thread (fallback mechanism)
-        print("[STALE-POLL] Starting stale connection polling thread...", file=sys.stderr, flush=True)
+        if RNS:
+            RNS.log(f"{self.log_prefix} [STALE-POLL] Starting stale connection polling thread...", RNS.LOG_EXTREME)
         self.stale_poll_thread = threading.Thread(
             target=self._poll_stale_connections,
             daemon=True,
             name="stale-connection-poller"
         )
         self.stale_poll_thread.start()
-        print("[STALE-POLL] Thread started successfully", file=sys.stderr, flush=True)
+        if RNS:
+            RNS.log(f"{self.log_prefix} [STALE-POLL] Thread started successfully", RNS.LOG_EXTREME)
         self._log("Stale connection polling started", "DEBUG")
 
         self._log("GATT server started and advertising")
@@ -2302,11 +2404,29 @@ class BluezeroGATTServer:
                 return
 
             info = self.connected_centrals[central_address]
-            self._log(
-                f"Central disconnected: {central_address} "
-                f"(was connected for {time.time() - info['connected_at']:.1f}s)",
-                level="INFO"
-            )
+            connection_duration = time.time() - info['connected_at']
+
+            # Log with appropriate severity based on connection duration
+            if connection_duration < 30:
+                # Short-lived connections may indicate power management issues (e.g., Android doze mode)
+                self._log(
+                    f"Central disconnected: {central_address} "
+                    f"(was connected for {connection_duration:.1f}s - unusually short, may indicate power management)",
+                    level="WARNING"
+                )
+                # Add troubleshooting hint for Android devices
+                if connection_duration < 20:
+                    self._log(
+                        f"Short connection duration detected. If {central_address} is an Android device, "
+                        f"ensure battery optimization is disabled for the BLE app and the device is not in doze mode.",
+                        level="WARNING"
+                    )
+            else:
+                self._log(
+                    f"Central disconnected: {central_address} "
+                    f"(was connected for {connection_duration:.1f}s)",
+                    level="INFO"
+                )
 
             del self.connected_centrals[central_address]
 

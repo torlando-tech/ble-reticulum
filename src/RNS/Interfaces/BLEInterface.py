@@ -391,6 +391,7 @@ class BLEInterface(Interface):
         self.driver.on_data_received = self._data_received_callback
         self.driver.on_device_disconnected = self._device_disconnected_callback
         self.driver.on_error = self._error_callback
+        self.driver.on_duplicate_identity_detected = self._check_duplicate_identity
 
         # Redirect Python logging to RNS logging for proper formatting
         self._setup_logging_redirect()
@@ -774,6 +775,39 @@ class BLEInterface(Interface):
             RNS.log(f"{self} connected to {address}, but identity not provided and role is {role}. Disconnecting.", RNS.LOG_WARNING)
             self.driver.disconnect(address)
 
+    def _check_duplicate_identity(self, address: str, peer_identity: bytes) -> bool:
+        """
+        Driver callback: Check if peer identity already exists under a different MAC.
+
+        This handles Android MAC randomization where the same device advertises
+        with one MAC but connects with a different MAC.
+
+        Args:
+            address: MAC address attempting to connect
+            peer_identity: 16-byte identity hash of the peer
+
+        Returns:
+            True if this identity is already connected via a different MAC (abort connection)
+            False if this is a new identity or same MAC (allow connection)
+        """
+        if not peer_identity or len(peer_identity) != 16:
+            return False
+
+        identity_hash = self._compute_identity_hash(peer_identity)
+        existing_address = self.identity_to_address.get(identity_hash)
+
+        if existing_address and existing_address != address:
+            # Same identity, different MAC - this is Android MAC rotation
+            RNS.log(
+                f"{self} duplicate identity detected: {identity_hash[:8]} already connected via {existing_address}, "
+                f"rejecting connection from {address} (Android MAC rotation)",
+                RNS.LOG_WARNING
+            )
+            return True
+
+        # Either new identity or same MAC - allow connection
+        return False
+
     def _mtu_negotiated_callback(self, address: str, mtu: int):
         """
         Driver callback: Handle MTU negotiation completion.
@@ -928,6 +962,14 @@ class BLEInterface(Interface):
                 peer_if.detach()
                 del self.spawned_interfaces[identity_hash]
                 RNS.log(f"{self} detached interface for {address}", RNS.LOG_DEBUG)
+
+            # Clean up identity mappings to prevent stale connections
+            if address in self.address_to_identity:
+                del self.address_to_identity[address]
+                RNS.log(f"{self} cleaned up address_to_identity for {address}", RNS.LOG_DEBUG)
+            if identity_hash in self.identity_to_address:
+                del self.identity_to_address[identity_hash]
+                RNS.log(f"{self} cleaned up identity_to_address for {identity_hash}", RNS.LOG_DEBUG)
 
         # Clean up fragmenter/reassembler
         if peer_identity:
@@ -1538,47 +1580,6 @@ class BLEInterface(Interface):
             else:
                 RNS.log(f"{self} no interface for {sender_address}, packet dropped", RNS.LOG_WARNING)
 
-    def _create_peripheral_peer(self, address):
-        """
-        Create a peer interface for a central device connected to our GATT server.
-
-        Args:
-            address: BLE address of the central device
-        """
-        conn_id = f"{address}-peripheral"
-
-        if conn_id in self.spawned_interfaces:
-            return  # Already exists
-
-        # Create peer interface
-        peer_if = BLEPeerInterface(self, address, f"Central-{address[-8:]}")
-        peer_if.OUT = self.OUT
-        peer_if.IN = self.IN
-        peer_if.parent_interface = self
-        peer_if.bitrate = self.bitrate
-        peer_if.HW_MTU = self.HW_MTU
-        peer_if.online = True
-
-        # Register with transport
-        RNS.Transport.interfaces.append(peer_if)
-
-        # Note: No tunnel registration needed - direct peer connections use
-        # RNS.Transport.interfaces[] only (same pattern as I2PInterface)
-
-        self.spawned_interfaces[conn_id] = peer_if
-
-        # Create fragmenter using negotiated MTU from GATT server (if available)
-        # Fragmenters are keyed by ADDRESS (shared between central and peripheral connections)
-        # Note: MTU will be set via _mtu_negotiated_callback when driver reports it
-        with self.frag_lock:
-            if address not in self.fragmenters:
-                # Use default MTU until negotiation completes
-                mtu = 185  # Default fallback
-                RNS.log(f"{self} creating fragmenter with default MTU {mtu}, will update when negotiated", RNS.LOG_DEBUG)
-                self.fragmenters[address] = BLEFragmenter(mtu=mtu)
-
-        RNS.log(f"{self} created peer interface for central {address} (MTU: {mtu}) via peripheral", RNS.LOG_DEBUG)
-
     def handle_central_connected(self, address):
         """
         Handle a central device connecting to our GATT server.
@@ -1636,6 +1637,14 @@ class BLEInterface(Interface):
             peer_if.detach()
             del self.spawned_interfaces[identity_hash]
             RNS.log(f"{self} detached interface for {address}", RNS.LOG_DEBUG)
+
+            # Clean up identity mappings to prevent stale connections
+            if address in self.address_to_identity:
+                del self.address_to_identity[address]
+                RNS.log(f"{self} cleaned up address_to_identity for {address}", RNS.LOG_DEBUG)
+            if identity_hash in self.identity_to_address:
+                del self.identity_to_address[identity_hash]
+                RNS.log(f"{self} cleaned up identity_to_address for {identity_hash}", RNS.LOG_DEBUG)
 
             # Clean up fragmenter/reassembler
             frag_key = self._get_fragmenter_key(peer_identity, address)
