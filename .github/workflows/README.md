@@ -66,12 +66,17 @@ pytest tests/test_fragmentation.py tests/test_prioritization.py -v \
   --cov=src/RNS/Interfaces/BLEFragmentation.py \
   --cov-report=term-missing
 
-# Integration tests
+# Integration tests (excludes v2.2 protocol tests that need full RNS)
 pytest tests/ -v -m "not hardware" \
+  --ignore=tests/test_v2_2_identity_handshake.py \
+  --ignore=tests/test_v2_2_mac_sorting.py \
+  --ignore=tests/test_v2_2_race_conditions.py \
   --cov=src/RNS/Interfaces \
   --cov-report=term-missing \
   --tb=short
 ```
+
+**Note:** The v2.2 protocol test suites (`test_v2_2_*.py`) are excluded from CI because they require the full RNS module environment. These tests document expected behavior and will run when the interface is integrated into the main Reticulum repository.
 
 ## Why Two Jobs?
 
@@ -83,11 +88,108 @@ Separating unit and integration tests provides several benefits:
 4. **Separate Coverage**: Track unit test coverage separately from integration coverage
 5. **Granular Status**: See exactly which test category failed in PR checks
 
+### deploy.yml - Continuous Deployment
+
+This workflow automatically deploys code to Raspberry Pi devices on your local network after tests pass.
+
+#### Deployment Flow
+1. **Trigger**: Push to any branch (when `src/**` changes)
+2. **Dependencies**: Waits for `unit-tests` and `integration-tests` to pass
+3. **Runner**: Executes on self-hosted runner (must be on same network as Pis)
+4. **Deployment Steps** (per Pi):
+   - Navigate to repository directory
+   - Fetch and checkout the pushed branch
+   - Pull latest changes
+   - Copy `src/RNS/Interfaces/*.py` to `~/.reticulum/interfaces/`
+   - Restart `rnsd` service
+
+#### Required Secrets
+
+Configure these in GitHub Settings → Secrets and variables → Actions:
+
+| Secret | Description | Example |
+|--------|-------------|---------|
+| `PI_HOSTS` | Comma-separated list of Pi hostnames/IPs | `pi1.local,pi2.local,192.168.1.100` |
+| `PI_REPO_PATH` | Absolute path to repository on Pis | `/home/pi/ble-reticulum` |
+| `PI_USER` | SSH username for Pi access | `pi` |
+| `PI_SSH_KEY` | SSH private key for passwordless authentication | `-----BEGIN OPENSSH PRIVATE KEY-----...` |
+
+#### SSH Configuration
+
+**For containerized runners (k3s, Docker, etc.):**
+
+Since the runner is ephemeral, the SSH key is stored in GitHub Secrets and configured at runtime:
+
+```bash
+# 1. Generate SSH key pair (on any machine)
+ssh-keygen -t ed25519 -C "github-runner-deployment" -f ~/.ssh/github_runner_deploy
+# Press Enter for no passphrase (required for automation)
+
+# 2. Copy public key to each Raspberry Pi
+ssh-copy-id -i ~/.ssh/github_runner_deploy.pub pi@pi1.local
+ssh-copy-id -i ~/.ssh/github_runner_deploy.pub pi@pi2.local
+
+# 3. Add private key to GitHub Secrets
+# Copy the private key content:
+cat ~/.ssh/github_runner_deploy
+# Then add to GitHub Settings → Secrets → PI_SSH_KEY
+# (Paste the entire key including -----BEGIN and -----END lines)
+
+# 4. Test from any machine with the private key
+ssh -i ~/.ssh/github_runner_deploy pi@pi1.local 'echo "Connection successful"'
+```
+
+**For persistent runners:**
+
+If your runner has persistent storage, you can use traditional SSH key setup:
+
+```bash
+# On the self-hosted runner
+ssh-keygen -t ed25519 -C "github-runner"
+ssh-copy-id pi@pi1.local
+ssh-copy-id pi@pi2.local
+
+# Then set PI_SSH_KEY to the private key content
+cat ~/.ssh/id_ed25519
+```
+
+#### Deployment Status
+
+The workflow fails if ANY Pi fails to deploy. Check job logs for:
+- Individual Pi deployment status (✓ success / ✗ failed)
+- Deployment summary with success/failure counts
+- GitHub Actions summary with commit info
+
+#### Troubleshooting Deployment
+
+**Deployment skipped:**
+- Check that tests passed (deployment depends on test jobs)
+- Verify changes were in `src/**` directory
+
+**SSH connection failed:**
+- Verify Pi is reachable: `ping pi1.local`
+- Check SSH keys are configured correctly
+- Ensure `PI_HOSTS` secret matches actual hostnames
+
+**Git operations failed:**
+- Verify `PI_REPO_PATH` is correct
+- Ensure repository exists on Pis
+- Check branch exists on remote
+
+**rnsd restart failed:**
+- Check if systemd service exists: `systemctl status rnsd`
+- Verify user has sudo permissions (for systemd)
+- Check if rnsd binary is in PATH
+
 ## Workflow Triggers
 
-Both workflows trigger on:
+### test.yml
 - **Push** to any branch
 - **Pull request** to any branch
+
+### deploy.yml
+- **Push** to any branch (only if `src/**` or workflow file changes)
+- Automatically runs after tests pass
 
 ## Dependencies
 

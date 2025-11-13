@@ -89,10 +89,6 @@ class BLEFragmenter:
         Returns:
             list of bytes, each element is one BLE fragment with header + data
         """
-        # DIAGNOSTIC: Entry logging
-        if RNS:
-            RNS.log(f"BLEFragmenter: ENTRY fragment_packet({len(packet) if isinstance(packet, bytes) else 'NOT BYTES'} bytes)", RNS.LOG_DEBUG)
-
         if not isinstance(packet, bytes):
             raise TypeError("Packet must be bytes")
 
@@ -220,10 +216,6 @@ class BLEReassembler:
         Raises:
             ValueError: If fragment is malformed
         """
-        # DIAGNOSTIC: Entry logging
-        if RNS:
-            RNS.log(f"BLEReassembler: ENTRY receive_fragment({len(fragment) if isinstance(fragment, bytes) else 'NOT BYTES'} bytes, sender={sender_id})", RNS.LOG_DEBUG)
-
         if not isinstance(fragment, bytes):
             raise TypeError("Fragment must be bytes")
 
