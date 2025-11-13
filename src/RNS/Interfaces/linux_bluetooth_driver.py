@@ -653,7 +653,10 @@ class LinuxBluetoothDriver(BLEDriverInterface):
             scan_time = 1.0
 
         self._log(f"🔍 Starting BleakScanner (power_mode={self.power_mode}, scan_time={scan_time}s, service_uuid={self.service_uuid})", "EXTRA")
-        scanner = BleakScanner(detection_callback=detection_callback)
+        scanner = BleakScanner(
+            detection_callback=detection_callback,
+            service_uuids=[self.service_uuid] if self.service_uuid else None
+        )
 
         try:
             self._log("🔍 Calling scanner.start()", "EXTRA")
