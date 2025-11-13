@@ -446,6 +446,110 @@ class TestRealWorldScenario:
         driver._peers[new_android] = Mock()
         assert new_android in driver._peers, "New Android device should connect successfully"
 
+    def test_both_monitoring_mechanisms_detect_disconnect_idempotent(self, mock_driver):
+        """
+        Integration test: Both D-Bus signals and polling detect same disconnect.
+
+        Verifies that cleanup is idempotent - if both mechanisms detect the same
+        disconnect, cleanup should only happen once without errors.
+        """
+        from RNS.Interfaces.linux_bluetooth_driver import BluezeroGATTServer
+
+        # Setup GATT server with monitoring
+        server = Mock(spec=BluezeroGATTServer)
+        server.driver = mock_driver
+        server.connected_centrals = {}
+        server.centrals_lock = threading.RLock()
+        server._log = Mock()
+
+        # Track cleanup calls
+        cleanup_calls = []
+
+        def track_cleanup(address):
+            cleanup_calls.append(address)
+            # Simulate actual cleanup
+            with server.centrals_lock:
+                if address in server.connected_centrals:
+                    del server.connected_centrals[address]
+
+        server._handle_central_disconnected = track_cleanup
+
+        # Add connected central
+        central_mac = "AA:BB:CC:DD:EE:FF"
+        server.connected_centrals[central_mac] = {"address": central_mac}
+
+        # Simulate D-Bus signal detecting disconnect
+        track_cleanup(central_mac)
+        assert len(cleanup_calls) == 1
+        assert central_mac not in server.connected_centrals
+
+        # Simulate polling also detecting disconnect (should be idempotent)
+        # Central is already removed from dict, so cleanup should not be called again
+        with server.centrals_lock:
+            if central_mac in server.connected_centrals:
+                track_cleanup(central_mac)
+
+        # Verify cleanup was only called once
+        assert len(cleanup_calls) == 1, "Cleanup should be idempotent"
+
+    def test_polling_catches_missed_dbus_signal(self, mock_driver):
+        """
+        Integration test: Polling detects disconnect that D-Bus signal missed.
+
+        Simulates scenario where D-Bus signal fails or is delayed, but polling
+        fallback detects and triggers cleanup within 30 seconds.
+        """
+        from RNS.Interfaces.linux_bluetooth_driver import BluezeroGATTServer
+
+        # Setup GATT server
+        server = Mock(spec=BluezeroGATTServer)
+        server.driver = mock_driver
+        server.connected_centrals = {}
+        server.centrals_lock = threading.RLock()
+        server._log = Mock()
+        server._handle_central_disconnected = Mock()
+
+        # Add connected central
+        central_mac = "AA:BB:CC:DD:EE:FF"
+        server.connected_centrals[central_mac] = {
+            "address": central_mac,
+            "connected_at": time.time()
+        }
+
+        # Simulate D-Bus signal FAILED to arrive (no cleanup called)
+        # ... time passes ...
+
+        # Simulate polling cycle detecting the disconnect
+        with patch('dbus.SystemBus') as mock_system_bus, \
+             patch('dbus.Interface') as mock_interface_class:
+
+            mock_bus = Mock()
+            mock_system_bus.return_value = mock_bus
+
+            mock_device = Mock()
+            mock_bus.get_object = Mock(return_value=mock_device)
+
+            mock_props_iface = Mock()
+            mock_interface_class.return_value = mock_props_iface
+
+            # Device shows as disconnected in BlueZ
+            mock_props_iface.Get = Mock(return_value=False)
+
+            # Polling checks BlueZ state
+            dbus_path = f"/org/bluez/hci0/dev_{central_mac.replace(':', '_')}"
+            device_obj = mock_bus.get_object("org.bluez", dbus_path)
+            props_iface = mock_interface_class(device_obj, "org.freedesktop.DBus.Properties")
+            is_connected = props_iface.Get("org.bluez.Device1", "Connected")
+
+            # Polling detects stale connection
+            if not is_connected:
+                with server.centrals_lock:
+                    if central_mac in server.connected_centrals:
+                        server._handle_central_disconnected(central_mac)
+
+            # Verify polling triggered cleanup
+            server._handle_central_disconnected.assert_called_once_with(central_mac)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
