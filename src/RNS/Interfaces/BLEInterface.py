@@ -1413,6 +1413,12 @@ class BLEInterface(Interface):
         """
         RNS.log(f"{self} received {len(data)} bytes from peer {peer_address}", RNS.LOG_EXTREME)
 
+        # Filter 1-byte keep-alive packets from Columba (Android) peers
+        # Columba sends 0x00 every 15 seconds to prevent Android BLE supervision timeout
+        if len(data) == 1 and data[0] == 0x00:
+            RNS.log(f"{self} received keep-alive from peer {peer_address}, ignoring", RNS.LOG_EXTREME)
+            return
+
         # Look up peer identity to compute fragmenter key
         peer_identity = self.address_to_identity.get(peer_address)
         if not peer_identity:
@@ -1495,6 +1501,12 @@ class BLEInterface(Interface):
             sender_address: BLE address of the central device
         """
         RNS.log(f"{self} received {len(data)} bytes from central {sender_address}", RNS.LOG_EXTREME)
+
+        # Filter 1-byte keep-alive packets from Columba (Android) peers
+        # Columba sends 0x00 every 15 seconds to prevent Android BLE supervision timeout
+        if len(data) == 1 and data[0] == 0x00:
+            RNS.log(f"{self} received keep-alive from central {sender_address}, ignoring", RNS.LOG_EXTREME)
+            return
 
         # Check if we have peer identity
         peer_identity = self.address_to_identity.get(sender_address)
