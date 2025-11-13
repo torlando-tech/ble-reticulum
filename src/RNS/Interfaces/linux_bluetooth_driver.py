@@ -849,6 +849,39 @@ class LinuxBluetoothDriver(BLEDriverInterface):
 
         self._log(f"Disconnected from {address}")
 
+    def _handle_peripheral_disconnected(self, address: str):
+        """
+        Handle disconnection of a central device from our GATT server (peripheral mode).
+
+        This is called by the GATT server when a central disconnects. It performs cleanup
+        of the peer connection from the driver's _peers dictionary and notifies callbacks.
+
+        This fixes the bug where peripheral mode disconnections were never cleaned up,
+        causing the peer limit to be reached and blocking new connections.
+
+        Args:
+            address: MAC address of the disconnected central device
+        """
+        self._log(f"Handling peripheral disconnection from {address}", "DEBUG")
+
+        # Clean up from _peers dictionary
+        with self._peers_lock:
+            if address in self._peers:
+                del self._peers[address]
+                self._log(f"Removed {address} from _peers (peripheral disconnect)", "DEBUG")
+            else:
+                self._log(f"Central {address} not in _peers during disconnect", "DEBUG")
+                return
+
+        # Notify higher-level callbacks (BLEInterface)
+        if self.on_device_disconnected:
+            try:
+                self.on_device_disconnected(address)
+            except Exception as e:
+                self._log(f"Error in device disconnected callback for {address}: {e}", "ERROR")
+
+        self._log(f"Peripheral disconnection cleanup complete for {address}")
+
     async def _remove_bluez_device(self, address: str) -> bool:
         """
         Remove stale device object from BlueZ via D-Bus.
@@ -1513,12 +1546,17 @@ class BluezeroGATTServer:
 
         # Thread
         self.server_thread: Optional[threading.Thread] = None
+        self.disconnect_monitor_thread: Optional[threading.Thread] = None
         self.stop_event = threading.Event()
         self.started_event = threading.Event()
 
         # Connected centrals (address -> info dict)
         self.connected_centrals: Dict[str, dict] = {}
         self.centrals_lock = threading.RLock()
+
+        # Wire up disconnection callback to driver
+        # This ensures peripheral disconnect events trigger cleanup in the driver
+        self.on_central_disconnected = driver._handle_peripheral_disconnected
 
     def _log(self, message: str, level: str = "INFO"):
         """Log message."""
@@ -1604,8 +1642,124 @@ class BluezeroGATTServer:
         self._log(f"Services not found on D-Bus after {timeout}s timeout", "DEBUG")
         return False
 
+    def _monitor_device_disconnections(self):
+        """
+        Monitor D-Bus for device disconnection signals (runs in separate thread).
+
+        This method subscribes to PropertiesChanged signals from BlueZ and detects
+        when connected central devices disconnect. When a disconnect is detected,
+        it calls _handle_central_disconnected() to perform cleanup.
+
+        This fixes the bug where peripheral disconnections were never detected,
+        causing stale peer entries and eventual connection blocking.
+
+        Runs continuously until stop_event is set.
+        """
+        import sys
+
+        if not HAS_DBUS:
+            print("[GATT-MONITOR] D-Bus not available, disconnect monitoring disabled", file=sys.stderr, flush=True)
+            self._log("D-Bus not available, disconnect monitoring disabled", "WARNING")
+            return
+
+        import asyncio
+        from dbus_fast.aio import MessageBus
+        from dbus_fast import BusType
+
+        print("[GATT-MONITOR] Starting D-Bus disconnect monitoring thread...", file=sys.stderr, flush=True)
+        self._log("Starting D-Bus disconnect monitoring thread...", "DEBUG")
+
+        async def monitor_loop():
+            """Async loop that monitors D-Bus signals."""
+            import sys
+            print("[GATT-MONITOR] Entered monitor_loop()", file=sys.stderr, flush=True)
+            try:
+                # Connect to system bus
+                print("[GATT-MONITOR] Connecting to D-Bus...", file=sys.stderr, flush=True)
+                bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+                print("[GATT-MONITOR] Connected to D-Bus successfully", file=sys.stderr, flush=True)
+                self._log("Connected to D-Bus for disconnect monitoring", "DEBUG")
+
+                def properties_changed_handler(interface_name, changed_properties, invalidated_properties, path):
+                    """Handle PropertiesChanged signal from BlueZ devices."""
+                    import sys
+                    try:
+                        # Only interested in org.bluez.Device1 interface
+                        if interface_name != "org.bluez.Device1":
+                            return
+
+                        # Check if Connected property changed
+                        if "Connected" in changed_properties:
+                            is_connected = changed_properties["Connected"].value
+
+                            if not is_connected:  # Device disconnected
+                                # Extract MAC address from D-Bus path
+                                # Path format: /org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF
+                                if "/dev_" in path:
+                                    mac_with_underscores = path.split("/dev_")[-1]
+                                    mac_address = mac_with_underscores.replace("_", ":")
+
+                                    print(f"[GATT-MONITOR] D-Bus: Device {mac_address} disconnected", file=sys.stderr, flush=True)
+                                    self._log(f"D-Bus: Device {mac_address} disconnected", "DEBUG")
+
+                                    # Check if this was a connected central
+                                    with self.centrals_lock:
+                                        if mac_address in self.connected_centrals:
+                                            print(f"[GATT-MONITOR] Detected central disconnect: {mac_address}", file=sys.stderr, flush=True)
+                                            self._log(f"Detected central disconnect via D-Bus: {mac_address}", "INFO")
+                                            # Call disconnect handler (safe to call from signal handler)
+                                            self._handle_central_disconnected(mac_address)
+
+                    except Exception as e:
+                        print(f"[GATT-MONITOR] Error in D-Bus signal handler: {e}", file=sys.stderr, flush=True)
+                        self._log(f"Error in D-Bus signal handler: {e}", "ERROR")
+
+                # Subscribe to PropertiesChanged signals
+                # We need to use match rules to subscribe to all Device1 PropertiesChanged signals
+                print("[GATT-MONITOR] Setting up message handler...", file=sys.stderr, flush=True)
+                bus.add_message_handler(
+                    lambda msg: properties_changed_handler(
+                        msg.body[0] if len(msg.body) > 0 else "",  # interface_name
+                        msg.body[1] if len(msg.body) > 1 else {},  # changed_properties
+                        msg.body[2] if len(msg.body) > 2 else [],  # invalidated_properties
+                        msg.path if hasattr(msg, 'path') else ""   # path
+                    ) if msg.message_type.name == 'SIGNAL' and msg.member == 'PropertiesChanged' else None
+                )
+
+                print("[GATT-MONITOR] Subscribed to D-Bus signals, entering monitor loop", file=sys.stderr, flush=True)
+                self._log("Subscribed to D-Bus disconnect signals", "DEBUG")
+
+                # Keep the monitoring thread alive until stop requested
+                while not self.stop_event.is_set():
+                    await asyncio.sleep(0.5)
+
+                print("[GATT-MONITOR] Stop event set, exiting loop", file=sys.stderr, flush=True)
+                self._log("D-Bus monitoring loop exiting", "DEBUG")
+
+            except Exception as e:
+                print(f"[GATT-MONITOR] EXCEPTION in monitoring loop: {e}", file=sys.stderr, flush=True)
+                self._log(f"Error in D-Bus monitoring loop: {e}", "ERROR")
+                import traceback
+                traceback.print_exc()
+
+        # Run the async monitoring loop
+        try:
+            print("[GATT-MONITOR] Calling asyncio.run(monitor_loop())", file=sys.stderr, flush=True)
+            asyncio.run(monitor_loop())
+        except Exception as e:
+            print(f"[GATT-MONITOR] Thread exception: {e}", file=sys.stderr, flush=True)
+            self._log(f"D-Bus monitoring thread error: {e}", "ERROR")
+            import traceback
+            traceback.print_exc()
+
+        print("[GATT-MONITOR] Thread exited", file=sys.stderr, flush=True)
+        self._log("D-Bus disconnect monitoring thread exited", "DEBUG")
+
     def start(self, device_name: Optional[str]):
         """Start GATT server and advertising."""
+        import sys
+        print(f"[GATT-MONITOR] BluezeroGATTServer.start() called, device_name={device_name}", file=sys.stderr, flush=True)
+
         if self.running:
             self._log("Server already running", "WARNING")
             return
@@ -1650,6 +1804,24 @@ class BluezeroGATTServer:
             # Don't fail hard - server might still work, just warn
             # raise RuntimeError("GATT services not found on D-Bus")
 
+        # Start D-Bus disconnect monitoring thread
+        import sys
+        print(f"[GATT-MONITOR] About to start monitoring thread, HAS_DBUS={HAS_DBUS}", file=sys.stderr, flush=True)
+        if HAS_DBUS:
+            print("[GATT-MONITOR] Creating thread...", file=sys.stderr, flush=True)
+            self.disconnect_monitor_thread = threading.Thread(
+                target=self._monitor_device_disconnections,
+                daemon=True,
+                name="dbus-disconnect-monitor"
+            )
+            print("[GATT-MONITOR] Starting thread...", file=sys.stderr, flush=True)
+            self.disconnect_monitor_thread.start()
+            print("[GATT-MONITOR] Thread started successfully", file=sys.stderr, flush=True)
+            self._log("D-Bus disconnect monitoring started", "DEBUG")
+        else:
+            print(f"[GATT-MONITOR] HAS_DBUS is False, skipping", file=sys.stderr, flush=True)
+            self._log("D-Bus not available, disconnect monitoring disabled", "WARNING")
+
         self._log("GATT server started and advertising")
 
     def stop(self):
@@ -1663,9 +1835,14 @@ class BluezeroGATTServer:
         self.stop_event.set()
         self.running = False
 
-        # Wait for thread to exit
+        # Wait for server thread to exit
         if self.server_thread and self.server_thread.is_alive():
             self.server_thread.join(timeout=5.0)
+
+        # Wait for disconnect monitoring thread to exit
+        if self.disconnect_monitor_thread and self.disconnect_monitor_thread.is_alive():
+            self.disconnect_monitor_thread.join(timeout=2.0)
+            self._log("D-Bus disconnect monitoring stopped", "DEBUG")
 
         # Unregister agent
         if self.ble_agent and HAS_BLE_AGENT:
@@ -1904,6 +2081,37 @@ class BluezeroGATTServer:
                 self.driver.on_mtu_negotiated(central_address, effective_mtu)
             except Exception as e:
                 self._log(f"Error in MTU negotiated callback: {e}", "ERROR")
+
+    def _handle_central_disconnected(self, central_address: str):
+        """
+        Handle central disconnection from GATT server.
+
+        This method is called when a central device disconnects from our peripheral.
+        It performs cleanup and notifies the driver via the on_central_disconnected callback.
+
+        Args:
+            central_address: MAC address of the disconnected central device
+        """
+        with self.centrals_lock:
+            if central_address not in self.connected_centrals:
+                self._log(f"Central {central_address} not in connected list during disconnect", "DEBUG")
+                return
+
+            info = self.connected_centrals[central_address]
+            self._log(
+                f"Central disconnected: {central_address} "
+                f"(was connected for {time.time() - info['connected_at']:.1f}s)",
+                level="INFO"
+            )
+
+            del self.connected_centrals[central_address]
+
+        # Notify driver via callback (if wired up)
+        if hasattr(self, 'on_central_disconnected') and self.on_central_disconnected:
+            try:
+                self.on_central_disconnected(central_address)
+            except Exception as e:
+                self._log(f"Error in central disconnected callback: {e}", "ERROR")
 
     def send_notification(self, central_address: str, data: bytes):
         """Send notification to a connected central."""
