@@ -1544,9 +1544,10 @@ class BluezeroGATTServer:
         # BLE agent
         self.ble_agent = None
 
-        # Thread
+        # Threads
         self.server_thread: Optional[threading.Thread] = None
         self.disconnect_monitor_thread: Optional[threading.Thread] = None
+        self.stale_poll_thread: Optional[threading.Thread] = None
         self.stop_event = threading.Event()
         self.started_event = threading.Event()
 
@@ -1646,14 +1647,19 @@ class BluezeroGATTServer:
         """
         Monitor D-Bus for device disconnection signals (runs in separate thread).
 
-        This method subscribes to PropertiesChanged signals from BlueZ and detects
-        when connected central devices disconnect. When a disconnect is detected,
-        it calls _handle_central_disconnected() to perform cleanup.
+        This method subscribes to PropertiesChanged signals from BlueZ using the
+        high-level ObjectManager API and detects when connected central devices
+        disconnect. When a disconnect is detected, it calls _handle_central_disconnected()
+        to perform cleanup.
 
         This fixes the bug where peripheral disconnections were never detected,
         causing stale peer entries and eventual connection blocking.
 
         Runs continuously until stop_event is set.
+
+        Implementation: Uses ObjectManager to monitor all BlueZ devices and subscribes
+        to PropertiesChanged signals via the high-level proxy interface, which properly
+        handles D-Bus message dispatch and signal delivery.
         """
         import sys
 
@@ -1670,9 +1676,13 @@ class BluezeroGATTServer:
         self._log("Starting D-Bus disconnect monitoring thread...", "DEBUG")
 
         async def monitor_loop():
-            """Async loop that monitors D-Bus signals."""
+            """Async loop that monitors D-Bus signals using ObjectManager."""
             import sys
             print("[GATT-MONITOR] Entered monitor_loop()", file=sys.stderr, flush=True)
+
+            bus = None
+            device_proxies = {}  # Track proxy objects for each device
+
             try:
                 # Connect to system bus
                 print("[GATT-MONITOR] Connecting to D-Bus...", file=sys.stderr, flush=True)
@@ -1680,9 +1690,15 @@ class BluezeroGATTServer:
                 print("[GATT-MONITOR] Connected to D-Bus successfully", file=sys.stderr, flush=True)
                 self._log("Connected to D-Bus for disconnect monitoring", "DEBUG")
 
-                def properties_changed_handler(interface_name, changed_properties, invalidated_properties, path):
-                    """Handle PropertiesChanged signal from BlueZ devices."""
-                    import sys
+                # Get ObjectManager for BlueZ to discover all devices
+                print("[GATT-MONITOR] Getting ObjectManager introspection...", file=sys.stderr, flush=True)
+                introspection = await bus.introspect("org.bluez", "/")
+                obj = bus.get_proxy_object("org.bluez", "/", introspection)
+                object_manager = obj.get_interface("org.freedesktop.DBus.ObjectManager")
+                print("[GATT-MONITOR] ObjectManager interface acquired", file=sys.stderr, flush=True)
+
+                def handle_properties_changed(interface_name, changed_properties, invalidated_properties, device_path):
+                    """Handle PropertiesChanged signal from a specific device."""
                     try:
                         # Only interested in org.bluez.Device1 interface
                         if interface_name != "org.bluez.Device1":
@@ -1690,13 +1706,14 @@ class BluezeroGATTServer:
 
                         # Check if Connected property changed
                         if "Connected" in changed_properties:
+                            # changed_properties is a dict of {property_name: Variant}
                             is_connected = changed_properties["Connected"].value
 
                             if not is_connected:  # Device disconnected
                                 # Extract MAC address from D-Bus path
                                 # Path format: /org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF
-                                if "/dev_" in path:
-                                    mac_with_underscores = path.split("/dev_")[-1]
+                                if "/dev_" in device_path:
+                                    mac_with_underscores = device_path.split("/dev_")[-1]
                                     mac_address = mac_with_underscores.replace("_", ":")
 
                                     print(f"[GATT-MONITOR] D-Bus: Device {mac_address} disconnected", file=sys.stderr, flush=True)
@@ -1707,29 +1724,90 @@ class BluezeroGATTServer:
                                         if mac_address in self.connected_centrals:
                                             print(f"[GATT-MONITOR] Detected central disconnect: {mac_address}", file=sys.stderr, flush=True)
                                             self._log(f"Detected central disconnect via D-Bus: {mac_address}", "INFO")
-                                            # Call disconnect handler (safe to call from signal handler)
+                                            # Call disconnect handler
                                             self._handle_central_disconnected(mac_address)
 
                     except Exception as e:
-                        print(f"[GATT-MONITOR] Error in D-Bus signal handler: {e}", file=sys.stderr, flush=True)
+                        print(f"[GATT-MONITOR] Error in PropertiesChanged handler: {e}", file=sys.stderr, flush=True)
                         self._log(f"Error in D-Bus signal handler: {e}", "ERROR")
+                        import traceback
+                        traceback.print_exc(file=sys.stderr)
 
-                # Subscribe to PropertiesChanged signals
-                # We need to use match rules to subscribe to all Device1 PropertiesChanged signals
-                print("[GATT-MONITOR] Setting up message handler...", file=sys.stderr, flush=True)
-                bus.add_message_handler(
-                    lambda msg: properties_changed_handler(
-                        msg.body[0] if len(msg.body) > 0 else "",  # interface_name
-                        msg.body[1] if len(msg.body) > 1 else {},  # changed_properties
-                        msg.body[2] if len(msg.body) > 2 else [],  # invalidated_properties
-                        msg.path if hasattr(msg, 'path') else ""   # path
-                    ) if msg.message_type.name == 'SIGNAL' and msg.member == 'PropertiesChanged' else None
-                )
+                async def subscribe_to_device(device_path):
+                    """Subscribe to PropertiesChanged for a specific device."""
+                    try:
+                        # Skip if already subscribed
+                        if device_path in device_proxies:
+                            return
 
-                print("[GATT-MONITOR] Subscribed to D-Bus signals, entering monitor loop", file=sys.stderr, flush=True)
-                self._log("Subscribed to D-Bus disconnect signals", "DEBUG")
+                        print(f"[GATT-MONITOR] Subscribing to device: {device_path}", file=sys.stderr, flush=True)
 
-                # Keep the monitoring thread alive until stop requested
+                        # Get device proxy
+                        device_introspection = await bus.introspect("org.bluez", device_path)
+                        device_obj = bus.get_proxy_object("org.bluez", device_path, device_introspection)
+                        device_proxies[device_path] = device_obj
+
+                        # Get Properties interface
+                        props_iface = device_obj.get_interface("org.freedesktop.DBus.Properties")
+
+                        # Subscribe to PropertiesChanged with lambda that passes device_path
+                        props_iface.on_properties_changed(
+                            lambda iface, changed, invalidated: handle_properties_changed(
+                                iface, changed, invalidated, device_path
+                            )
+                        )
+
+                        print(f"[GATT-MONITOR] Subscribed to device {device_path}", file=sys.stderr, flush=True)
+
+                    except Exception as e:
+                        print(f"[GATT-MONITOR] Error subscribing to device {device_path}: {e}", file=sys.stderr, flush=True)
+                        self._log(f"Error subscribing to device {device_path}: {e}", "WARNING")
+
+                def on_interfaces_added(path, interfaces):
+                    """Handle new devices being added to BlueZ."""
+                    try:
+                        if "org.bluez.Device1" in interfaces:
+                            print(f"[GATT-MONITOR] New device added: {path}", file=sys.stderr, flush=True)
+                            # Schedule subscription in the event loop
+                            asyncio.create_task(subscribe_to_device(path))
+                    except Exception as e:
+                        print(f"[GATT-MONITOR] Error in InterfacesAdded handler: {e}", file=sys.stderr, flush=True)
+
+                def on_interfaces_removed(path, interfaces):
+                    """Handle devices being removed from BlueZ."""
+                    try:
+                        if "org.bluez.Device1" in interfaces:
+                            print(f"[GATT-MONITOR] Device removed: {path}", file=sys.stderr, flush=True)
+                            # Clean up proxy
+                            if path in device_proxies:
+                                del device_proxies[path]
+                    except Exception as e:
+                        print(f"[GATT-MONITOR] Error in InterfacesRemoved handler: {e}", file=sys.stderr, flush=True)
+
+                # Subscribe to device additions/removals
+                print("[GATT-MONITOR] Setting up ObjectManager signal handlers...", file=sys.stderr, flush=True)
+                object_manager.on_interfaces_added(on_interfaces_added)
+                object_manager.on_interfaces_removed(on_interfaces_removed)
+                print("[GATT-MONITOR] ObjectManager handlers configured", file=sys.stderr, flush=True)
+
+                # Get existing devices and subscribe to them
+                print("[GATT-MONITOR] Getting existing managed objects...", file=sys.stderr, flush=True)
+                managed_objects = await object_manager.call_get_managed_objects()
+                print(f"[GATT-MONITOR] Found {len(managed_objects)} managed objects", file=sys.stderr, flush=True)
+
+                device_count = 0
+                for path, interfaces in managed_objects.items():
+                    if "org.bluez.Device1" in interfaces:
+                        device_count += 1
+                        await subscribe_to_device(path)
+
+                print(f"[GATT-MONITOR] Subscribed to {device_count} existing devices", file=sys.stderr, flush=True)
+                self._log(f"D-Bus monitoring active for {device_count} devices", "DEBUG")
+
+                # Keep the event loop running
+                print("[GATT-MONITOR] Entering wait loop...", file=sys.stderr, flush=True)
+
+                # Poll stop_event and yield to event loop to process D-Bus messages
                 while not self.stop_event.is_set():
                     await asyncio.sleep(0.5)
 
@@ -1740,7 +1818,16 @@ class BluezeroGATTServer:
                 print(f"[GATT-MONITOR] EXCEPTION in monitoring loop: {e}", file=sys.stderr, flush=True)
                 self._log(f"Error in D-Bus monitoring loop: {e}", "ERROR")
                 import traceback
-                traceback.print_exc()
+                traceback.print_exc(file=sys.stderr)
+
+            finally:
+                # Clean up bus connection
+                if bus:
+                    try:
+                        bus.disconnect()
+                        print("[GATT-MONITOR] D-Bus connection closed", file=sys.stderr, flush=True)
+                    except:
+                        pass
 
         # Run the async monitoring loop
         try:
@@ -1750,10 +1837,111 @@ class BluezeroGATTServer:
             print(f"[GATT-MONITOR] Thread exception: {e}", file=sys.stderr, flush=True)
             self._log(f"D-Bus monitoring thread error: {e}", "ERROR")
             import traceback
-            traceback.print_exc()
+            traceback.print_exc(file=sys.stderr)
 
         print("[GATT-MONITOR] Thread exited", file=sys.stderr, flush=True)
         self._log("D-Bus disconnect monitoring thread exited", "DEBUG")
+
+    def _poll_stale_connections(self):
+        """
+        Polling-based fallback for detecting stale connections (runs in separate thread).
+
+        This method runs independently of D-Bus signal monitoring and provides a
+        safety net by periodically checking if devices in connected_centrals are
+        still actually connected according to BlueZ's Device1 interface.
+
+        Polls every 30 seconds and triggers cleanup for any centrals that are
+        marked as connected locally but show Connected=False in BlueZ.
+
+        This handles cases where D-Bus signals are missed or delayed, ensuring
+        cleanup always happens eventually.
+        """
+        import sys
+        import time
+
+        print("[STALE-POLL] Starting stale connection polling thread...", file=sys.stderr, flush=True)
+        self._log("Starting stale connection polling", "DEBUG")
+
+        # Import at function level to avoid issues if not available
+        try:
+            import dbus
+        except ImportError:
+            print("[STALE-POLL] dbus-python not available, polling disabled", file=sys.stderr, flush=True)
+            self._log("dbus-python not available, stale connection polling disabled", "WARNING")
+            return
+
+        while not self.stop_event.is_set():
+            try:
+                # Wait for 30 seconds (check stop_event frequently)
+                for _ in range(60):  # 60 * 0.5s = 30s
+                    if self.stop_event.is_set():
+                        break
+                    time.sleep(0.5)
+
+                if self.stop_event.is_set():
+                    break
+
+                # Check all connected centrals
+                with self.centrals_lock:
+                    centrals_to_check = list(self.connected_centrals.keys())
+
+                if not centrals_to_check:
+                    continue
+
+                print(f"[STALE-POLL] Checking {len(centrals_to_check)} centrals...", file=sys.stderr, flush=True)
+
+                # Connect to D-Bus and check each device
+                try:
+                    bus = dbus.SystemBus()
+
+                    for mac_address in centrals_to_check:
+                        try:
+                            # Convert MAC to D-Bus path format
+                            dbus_path = f"/org/bluez/hci0/dev_{mac_address.replace(':', '_')}"
+
+                            # Get device object
+                            device_obj = bus.get_object("org.bluez", dbus_path)
+                            props_iface = dbus.Interface(device_obj, "org.freedesktop.DBus.Properties")
+
+                            # Check Connected property
+                            is_connected = props_iface.Get("org.bluez.Device1", "Connected")
+
+                            if not is_connected:
+                                # Device shows as disconnected in BlueZ but we still have it tracked
+                                print(f"[STALE-POLL] Detected stale connection: {mac_address}", file=sys.stderr, flush=True)
+                                self._log(f"Polling detected stale connection: {mac_address}", "INFO")
+
+                                # Trigger cleanup
+                                with self.centrals_lock:
+                                    if mac_address in self.connected_centrals:
+                                        self._handle_central_disconnected(mac_address)
+
+                        except dbus.exceptions.DBusException as e:
+                            # Device might not exist in BlueZ anymore
+                            if "UnknownObject" in str(e) or "UnknownMethod" in str(e):
+                                print(f"[STALE-POLL] Device {mac_address} no longer in BlueZ, cleaning up", file=sys.stderr, flush=True)
+                                self._log(f"Device {mac_address} no longer in BlueZ", "DEBUG")
+
+                                # Trigger cleanup
+                                with self.centrals_lock:
+                                    if mac_address in self.connected_centrals:
+                                        self._handle_central_disconnected(mac_address)
+                            else:
+                                # Other D-Bus error, log but don't cleanup
+                                print(f"[STALE-POLL] D-Bus error checking {mac_address}: {e}", file=sys.stderr, flush=True)
+
+                except Exception as e:
+                    print(f"[STALE-POLL] Error during polling cycle: {e}", file=sys.stderr, flush=True)
+                    self._log(f"Error in stale connection polling: {e}", "WARNING")
+
+            except Exception as e:
+                print(f"[STALE-POLL] Unexpected error: {e}", file=sys.stderr, flush=True)
+                self._log(f"Unexpected error in polling thread: {e}", "ERROR")
+                import traceback
+                traceback.print_exc(file=sys.stderr)
+
+        print("[STALE-POLL] Thread exited", file=sys.stderr, flush=True)
+        self._log("Stale connection polling thread exited", "DEBUG")
 
     def start(self, device_name: Optional[str]):
         """Start GATT server and advertising."""
@@ -1822,6 +2010,17 @@ class BluezeroGATTServer:
             print(f"[GATT-MONITOR] HAS_DBUS is False, skipping", file=sys.stderr, flush=True)
             self._log("D-Bus not available, disconnect monitoring disabled", "WARNING")
 
+        # Start stale connection polling thread (fallback mechanism)
+        print("[STALE-POLL] Starting stale connection polling thread...", file=sys.stderr, flush=True)
+        self.stale_poll_thread = threading.Thread(
+            target=self._poll_stale_connections,
+            daemon=True,
+            name="stale-connection-poller"
+        )
+        self.stale_poll_thread.start()
+        print("[STALE-POLL] Thread started successfully", file=sys.stderr, flush=True)
+        self._log("Stale connection polling started", "DEBUG")
+
         self._log("GATT server started and advertising")
 
     def stop(self):
@@ -1843,6 +2042,11 @@ class BluezeroGATTServer:
         if self.disconnect_monitor_thread and self.disconnect_monitor_thread.is_alive():
             self.disconnect_monitor_thread.join(timeout=2.0)
             self._log("D-Bus disconnect monitoring stopped", "DEBUG")
+
+        # Wait for stale polling thread to exit
+        if self.stale_poll_thread and self.stale_poll_thread.is_alive():
+            self.stale_poll_thread.join(timeout=2.0)
+            self._log("Stale connection polling stopped", "DEBUG")
 
         # Unregister agent
         if self.ble_agent and HAS_BLE_AGENT:
