@@ -1589,6 +1589,8 @@ class BluezeroGATTServer:
         self.adapter_index = adapter_index
         self.agent_capability = agent_capability
 
+        self.log_prefix = "BluezeroGATTServer"
+
         # bluezero objects
         self.peripheral_obj = None
         self.tx_characteristic = None
