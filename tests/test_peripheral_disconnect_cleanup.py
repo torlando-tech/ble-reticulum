@@ -45,23 +45,25 @@ if not hasattr(RNS, 'LOG_INFO'):
 RNS.log = Mock()
 
 
+# Module-level fixture (shared across test classes)
+@pytest.fixture
+def mock_driver():
+    """Create a mock Linux BLE driver with GATT server capabilities."""
+    driver = Mock()
+    driver.loop = asyncio.new_event_loop()
+    driver._peers = {}  # address -> peer_conn
+    driver._peers_lock = asyncio.Lock()
+    driver._log = Mock()
+    driver.on_device_disconnected = Mock()
+
+    # Mock method that should be added
+    driver._handle_peripheral_disconnected = Mock()
+
+    return driver
+
+
 class TestPeripheralDisconnectCleanup:
     """Test peripheral disconnection cleanup mechanisms."""
-
-    @pytest.fixture
-    def mock_driver(self):
-        """Create a mock Linux BLE driver with GATT server capabilities."""
-        driver = Mock()
-        driver.loop = asyncio.new_event_loop()
-        driver._peers = {}  # address -> peer_conn
-        driver._peers_lock = asyncio.Lock()
-        driver._log = Mock()
-        driver.on_device_disconnected = Mock()
-
-        # Mock method that should be added
-        driver._handle_peripheral_disconnected = Mock()
-
-        return driver
 
     @pytest.fixture
     def mock_gatt_server(self, mock_driver):
