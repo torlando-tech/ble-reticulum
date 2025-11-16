@@ -35,6 +35,19 @@ print_info() {
     echo -e "${BLUE}ℹ${NC} $1"
 }
 
+# Helper function: Detect if running in a container environment
+is_container() {
+    # Check for Docker container
+    if [ -f /.dockerenv ]; then
+        return 0
+    fi
+    # Check cgroup for container indicators
+    if grep -q -E 'docker|lxc|containerd|kubepods' /proc/1/cgroup 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
 # Helper function: pip install with compatibility across all OS versions
 pip_install() {
     local packages="$*"
@@ -323,6 +336,35 @@ echo
 # Step 3: Install Python dependencies
 print_header "Installing Python Dependencies"
 
+# Download pre-built wheels for 32-bit ARM (Pi Zero W optimization)
+# Saves ~15-30 minutes of compilation time for packages with C extensions
+if [[ "$ARCH" == "armhf" ]] || [[ "$(uname -m)" =~ ^(armv6l|armv7l)$ ]]; then
+    PYTHON_VER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo "unknown")
+
+    if [[ "$PYTHON_VER" == "3.13" ]]; then
+        print_info "Python 3.13 on 32-bit ARM detected - downloading pre-built dbus_fast wheel..."
+        print_info "This saves ~20 minutes of compilation time on Pi Zero W"
+
+        WHEEL_URL="https://github.com/torlando-tech/ble-reticulum/releases/download/armv6l-wheels-v1/dbus_fast-2.44.5-cp313-cp313-linux_armv6l.whl"
+        WHEEL_FILE="/tmp/dbus_fast-armv6l-$$.whl"
+
+        if curl -sL "$WHEEL_URL" -o "$WHEEL_FILE" 2>/dev/null; then
+            if [ -f "$WHEEL_FILE" ] && [ -s "$WHEEL_FILE" ]; then
+                print_success "Pre-built dbus_fast wheel downloaded (874KB)"
+                pip_install "$WHEEL_FILE"
+                rm -f "$WHEEL_FILE"
+                print_success "dbus_fast installed from pre-built wheel"
+            else
+                print_warning "Download failed or file empty, will build from source if needed"
+                rm -f "$WHEEL_FILE"
+            fi
+        else
+            print_warning "Could not download pre-built wheel, will build from source if needed"
+        fi
+        echo
+    fi
+fi
+
 print_info "Installing pip packages (PyGObject, dbus-python, pycairo provided by system packages)"
 
 if [ "$INSTALL_MODE" = "venv" ]; then
@@ -379,7 +421,10 @@ mkdir -p "$INTERFACES_DIR"
 
 # Copy interface files
 print_info "Copying BLE interface files to: $INTERFACES_DIR"
-cp src/RNS/Interfaces/BLE*.py "$INTERFACES_DIR/"
+cp src/RNS/Interfaces/BLE*.py \
+   src/RNS/Interfaces/bluetooth_driver.py \
+   src/RNS/Interfaces/linux_bluetooth_driver.py \
+   "$INTERFACES_DIR/"
 
 # Create __init__.py if it doesn't exist
 if [ ! -f "$INTERFACES_DIR/__init__.py" ]; then
@@ -391,6 +436,8 @@ echo "  - BLEInterface.py"
 echo "  - BLEGATTServer.py"
 echo "  - BLEFragmentation.py"
 echo "  - BLEAgent.py"
+echo "  - bluetooth_driver.py"
+echo "  - linux_bluetooth_driver.py"
 
 echo
 
@@ -646,7 +693,13 @@ fi
 # Step 5B: Bluetooth Adapter Power State
 print_header "Bluetooth Adapter Power State"
 
-if command -v bluetoothctl &> /dev/null; then
+# Skip Bluetooth checks in container environments (no hardware access)
+if is_container; then
+    print_info "Container environment detected - skipping Bluetooth adapter checks"
+    print_warning "Bluetooth hardware is not available in containers"
+    print_info "This is expected behavior for CI/testing environments"
+    echo
+elif command -v bluetoothctl &> /dev/null; then
     print_info "Checking Bluetooth adapter power state..."
 
     # Check for rfkill blocks first (must be unblocked before power-on works)
@@ -701,6 +754,88 @@ if command -v bluetoothctl &> /dev/null; then
 else
     print_warning "bluetoothctl not available, cannot check adapter power state"
     print_info "Ensure Bluetooth adapter is powered on before running rnsd"
+fi
+
+echo
+
+# Step 5C: BlueZ LE-Only Mode Configuration
+print_header "BlueZ LE-Only Mode Configuration"
+
+# Skip BlueZ configuration in container environments (no hardware access)
+if is_container; then
+    print_info "Container environment detected - skipping BlueZ LE-only mode configuration"
+    print_warning "BlueZ configuration is not applicable in containers"
+    print_info "This is expected behavior for CI/testing environments"
+    echo
+elif ! command -v bluetoothctl &> /dev/null; then
+    print_warning "bluetoothctl not found - skipping LE-only mode configuration"
+    echo
+elif [ ! -f /etc/bluetooth/main.conf ]; then
+    print_warning "/etc/bluetooth/main.conf not found - BlueZ config file missing"
+    echo
+else
+    print_info "Configuring BlueZ adapter for LE-only mode (BLE-only, no BR/EDR Classic)"
+    print_info "This prevents 'br-connection-profile-unavailable' errors on dual-mode hardware"
+    echo
+
+    # Check if ControllerMode is already set to 'le'
+    if grep -q "^[[:space:]]*ControllerMode[[:space:]]*=[[:space:]]*le" /etc/bluetooth/main.conf 2>/dev/null; then
+        print_success "ControllerMode already set to 'le' in /etc/bluetooth/main.conf"
+        echo
+    else
+        print_info "Adding ControllerMode = le to /etc/bluetooth/main.conf..."
+
+        # Create backup
+        BACKUP_FILE="/etc/bluetooth/main.conf.backup.$(date +%Y%m%d_%H%M%S)"
+        if sudo cp /etc/bluetooth/main.conf "$BACKUP_FILE" 2>/dev/null; then
+            print_success "Created backup: $BACKUP_FILE"
+        else
+            print_warning "Could not create backup (continuing anyway)"
+        fi
+
+        # Check if [General] section exists
+        if grep -q "^\[General\]" /etc/bluetooth/main.conf 2>/dev/null; then
+            # [General] section exists - add ControllerMode after it
+            # First, check if ControllerMode is commented out or set to something else
+            if grep -q "^[[:space:]]*#[[:space:]]*ControllerMode" /etc/bluetooth/main.conf 2>/dev/null; then
+                # Commented out - uncomment and set to le
+                sudo sed -i 's/^[[:space:]]*#[[:space:]]*ControllerMode[[:space:]]*=.*/ControllerMode = le/' /etc/bluetooth/main.conf
+                print_success "Uncommented and set ControllerMode = le"
+            elif grep -q "^[[:space:]]*ControllerMode[[:space:]]*=" /etc/bluetooth/main.conf 2>/dev/null; then
+                # Already exists but set to different value - update it
+                sudo sed -i 's/^[[:space:]]*ControllerMode[[:space:]]*=.*/ControllerMode = le/' /etc/bluetooth/main.conf
+                print_success "Updated existing ControllerMode to 'le'"
+            else
+                # Doesn't exist - add it after [General]
+                sudo sed -i '/^\[General\]/a ControllerMode = le' /etc/bluetooth/main.conf
+                print_success "Added ControllerMode = le under [General] section"
+            fi
+        else
+            # No [General] section - add both section and setting at end
+            echo "" | sudo tee -a /etc/bluetooth/main.conf > /dev/null
+            echo "[General]" | sudo tee -a /etc/bluetooth/main.conf > /dev/null
+            echo "ControllerMode = le" | sudo tee -a /etc/bluetooth/main.conf > /dev/null
+            print_success "Added [General] section with ControllerMode = le"
+        fi
+
+        echo
+        print_info "Restarting BlueZ service to apply changes..."
+        if sudo systemctl restart bluetooth 2>/dev/null || sudo service bluetooth restart 2>/dev/null; then
+            print_success "BlueZ service restarted successfully"
+            sleep 2  # Give BlueZ time to reinitialize
+
+            # Verify the setting was applied
+            if grep -q "^[[:space:]]*ControllerMode[[:space:]]*=[[:space:]]*le" /etc/bluetooth/main.conf 2>/dev/null; then
+                print_success "ControllerMode = le configuration verified"
+            else
+                print_warning "Could not verify ControllerMode setting - check manually"
+            fi
+        else
+            print_error "Failed to restart BlueZ service"
+            print_info "You may need to restart manually: sudo systemctl restart bluetooth"
+        fi
+        echo
+    fi
 fi
 
 echo

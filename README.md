@@ -53,6 +53,8 @@ To skip this configuration (not recommended):
 ./install.sh --skip-experimental
 ```
 
+**Pi Zero W Optimization**: The installer automatically detects Raspberry Pi Zero W (32-bit ARM with Python 3.13) and downloads pre-built wheels for packages with C extensions. This saves ~20 minutes of compilation time compared to building from source. See [Pre-built Wheels](#pre-built-wheels-for-raspberry-pi-zero-w) for details.
+
 ### Option B: Manual Installation
 
 #### 1. Install System Dependencies
@@ -159,8 +161,8 @@ Add the BLE interface to your Reticulum configuration (`~/.reticulum/config`):
   type = BLEInterface
   enabled = yes
 
-  # Optional: customize device name
-  # device_name = My-Reticulum-Node
+  # Optional: set short device name (max 8 chars recommended, default: none)
+  # device_name = RNS
 ```
 
 For detailed configuration options, see [`examples/config_example.toml`](examples/config_example.toml).
@@ -195,7 +197,7 @@ The BLE interface supports extensive configuration options. See [`examples/confi
 
 ### Key Configuration Options
 
-- **`device_name`**: Advertised device name (auto-generated if not specified)
+- **`device_name`**: Optional BLE device name (default: none, keep short if used, max 8 chars recommended)
 - **`service_uuid`**: BLE service UUID (must match on all devices)
 - **`enable_peripheral`**: Accept incoming connections (default: yes)
 - **`enable_central`**: Scan and connect to peers (default: yes)
@@ -227,6 +229,7 @@ python ble_minimal_test.py test
 - Reduce `max_connections` to 3-5
 - Check for BLE/WiFi interference (both use 2.4 GHz)
 - Verify peer is within range (typically 10-30m)
+- If logs show "Operation already in progress" errors, this is handled automatically in v2.2.1+ with connection state tracking and rate limiting (see [BLE_PROTOCOL_v2.2.md](BLE_PROTOCOL_v2.2.md) § Troubleshooting for details)
 
 ### GATT server failed to start
 - Ensure BlueZ 5.x is installed: `bluetoothd --version`
@@ -336,6 +339,58 @@ pytest --cov=src/RNS/Interfaces --cov-report=html
 ```
 
 For detailed development and testing guidelines, see [CONTRIBUTING.md](CONTRIBUTING.md) and [TESTING.md](TESTING.md).
+
+## Pre-built Wheels for Raspberry Pi Zero W
+
+To speed up installation on 32-bit ARM devices (Raspberry Pi Zero W, Pi 1, Pi 2), we provide pre-built wheels for packages with C extensions that would otherwise require lengthy compilation from source.
+
+### Automatic Installation
+
+The `install.sh` script **automatically detects** 32-bit ARM architecture with Python 3.13 and downloads pre-built wheels from [GitHub Releases](https://github.com/torlando-tech/ble-reticulum/releases/tag/armv6l-wheels-v1).
+
+**Time savings:** ~20 minutes on Pi Zero W (avoids compiling C extensions)
+
+### Available Wheels
+
+| Package | Version | Python | Architecture | Size |
+|---------|---------|--------|--------------|------|
+| dbus_fast | 2.44.5 | 3.13 | ARMv6l | 874KB |
+
+### Manual Installation
+
+If you need to install wheels manually (e.g., in a custom Python environment):
+
+```bash
+# Download the wheel
+wget https://github.com/torlando-tech/ble-reticulum/releases/download/armv6l-wheels-v1/dbus_fast-2.44.5-cp313-cp313-linux_armv6l.whl
+
+# Install it
+pip install dbus_fast-2.44.5-cp313-cp313-linux_armv6l.whl
+```
+
+### Building Your Own Wheels
+
+If you need to build wheels for a different Python version on 32-bit ARM:
+
+```bash
+# Install build dependencies
+sudo apt-get install python3-dev libdbus-1-dev pkg-config
+
+# Build the wheel
+pip wheel dbus_fast==2.44.5
+
+# The wheel will be saved in the current directory
+# You can then share it or install it on other devices
+```
+
+### Why Pre-built Wheels?
+
+Python packages with C extensions (like `dbus_fast`) must be compiled from source when installing via pip if no compatible wheel is available on PyPI. On low-powered devices like the Pi Zero W:
+
+- **Without pre-built wheel:** 15-30 minutes of compilation
+- **With pre-built wheel:** < 10 seconds download and install
+
+The automated installer makes this transparent - it "just works" faster on supported platforms.
 
 ## Contributing
 

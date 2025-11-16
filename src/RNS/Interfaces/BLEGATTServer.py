@@ -57,13 +57,16 @@ class BLEGATTServer:
     """
 
     # Service UUID for Reticulum BLE
-    SERVICE_UUID = "00000001-5824-4f48-9e1a-3b3e8f0c1234"
+    SERVICE_UUID = "37145b00-442d-4a94-917f-8f42c5da28e3"
 
     # RX Characteristic: Centrals write to this (we receive)
-    RX_CHAR_UUID = "00000002-5824-4f48-9e1a-3b3e8f0c1234"
+    RX_CHAR_UUID = "37145b00-442d-4a94-917f-8f42c5da28e5"
 
     # TX Characteristic: We notify on this (centrals receive)
-    TX_CHAR_UUID = "00000003-5824-4f48-9e1a-3b3e8f0c1234"
+    TX_CHAR_UUID = "37145b00-442d-4a94-917f-8f42c5da28e4"
+
+    # Identity Characteristic: Centrals read this to get stable node identity (Protocol v2)
+    IDENTITY_CHAR_UUID = "37145b00-442d-4a94-917f-8f42c5da28e6"
 
     def __init__(self, interface, device_name: str = "Reticulum-Node", agent_capability: str = "NoInputNoOutput"):
         """
@@ -87,6 +90,9 @@ class BLEGATTServer:
         self.peripheral_obj = None
         self.tx_characteristic = None
         self.rx_characteristic = None
+
+        # Identity (Protocol v2)
+        self.identity_hash = None  # 16-byte Transport identity hash
 
         # BLE agent for automatic pairing
         self.ble_agent = None
@@ -147,10 +153,6 @@ class BLEGATTServer:
         Returns:
             value: Echo back the value (required by bluezero)
         """
-        # DIAGNOSTIC: Entry point for peripheral data reception
-        value_len = len(value) if hasattr(value, '__len__') else 'N/A'
-        self._log(f"_handle_write_rx ENTRY: value_len={value_len}, options_keys={list(options.keys())}", level="DEBUG")
-
         # Convert to bytes - ensure we always have bytes type
         if isinstance(value, list):
             data = bytes(value)
@@ -186,9 +188,7 @@ class BLEGATTServer:
                     self._log(f"Updated MTU for {central_address}: {old_mtu} -> {mtu}", level="DEBUG")
 
         # Pass data to callback for processing
-        # IMPORTANT: Ensure data is bytes before passing to reassembler
         if self.on_data_received:
-            self._log(f"DIAGNOSTIC: on_data_received callback EXISTS, preparing to call with {len(data)} bytes for {central_address}", level="DEBUG")
             try:
                 # Verify data is bytes before callback
                 if not isinstance(data, bytes):
@@ -196,17 +196,42 @@ class BLEGATTServer:
                     data = bytes(data)
 
                 # Call the callback (synchronous call - runs in bluezero thread)
-                self._log(f"DIAGNOSTIC: CALLING on_data_received({len(data)} bytes, {central_address})", level="DEBUG")
                 self.on_data_received(data, central_address)
-                self._log(f"DIAGNOSTIC: on_data_received RETURNED successfully", level="DEBUG")
             except Exception as e:
                 self._log(f"ERROR in data received callback: {type(e).__name__}: {e}", level="ERROR")
                 import traceback
                 self._log(f"Traceback: {traceback.format_exc()}", level="ERROR")
         else:
-            self._log(f"DIAGNOSTIC: on_data_received callback is NONE! Data LOST: {len(data)} bytes from {central_address}", level="ERROR")
+            self._log(f"on_data_received callback is NONE! Data LOST: {len(data)} bytes from {central_address}", level="ERROR")
 
         return value  # bluezero expects us to return the value
+
+    def _handle_read_identity(self, options):
+        """
+        Handle read request for Identity characteristic (bluezero callback)
+
+        Called when a central reads the Identity characteristic.
+        Returns the 16-byte Transport identity hash.
+
+        Args:
+            options: D-Bus options dict (may contain 'device' address)
+
+        Returns:
+            list of ints: The 16-byte identity hash as a list of integers
+        """
+        # Extract central address from options
+        central_address = options.get("device", "unknown")
+        if central_address and central_address != "unknown":
+            central_address = central_address.split("/")[-1].replace("_", ":")
+
+        if self.identity_hash is None:
+            self._log(f">>> READ REQUEST for Identity from {central_address}: Identity not available yet", level="WARNING")
+            return []  # Return empty if not available
+
+        # Convert bytes to list of ints for bluezero
+        identity_list = list(self.identity_hash)
+        self._log(f">>> READ REQUEST for Identity from {central_address}: Serving {len(identity_list)} bytes", level="INFO")
+        return identity_list
 
     def _handle_central_connected(self, central_address: str, mtu: Optional[int] = None):
         """
@@ -236,10 +261,6 @@ class BLEGATTServer:
         }
 
         self._log(f"Central connected: {central_address} (MTU: {effective_mtu})", level="INFO")
-
-        # DIAGNOSTIC: Check callback registration and invoke
-        callback_registered = self.on_central_connected is not None
-        self._log(f"on_central_connected callback: registered={callback_registered}", level="DEBUG")
 
         if self.on_central_connected:
             try:
@@ -350,10 +371,26 @@ class BLEGATTServer:
                 chr_id=2,
                 uuid=self.TX_CHAR_UUID,
                 value=[],
-                notifying=True,  # Enable notifications
+                notifying=True,
                 flags=['read', 'notify']
             )
             self._log(f"Added TX characteristic: {self.TX_CHAR_UUID} (READ, NOTIFY)", level="DEBUG")
+
+            # Add Identity characteristic (read to get stable node identity - Protocol v2)
+            identity_value = list(self.identity_hash) if self.identity_hash else []
+            self.peripheral_obj.add_characteristic(
+                srv_id=1,
+                chr_id=3,
+                uuid=self.IDENTITY_CHAR_UUID,
+                value=identity_value,
+                notifying=False,
+                flags=['read'],
+                read_callback=self._handle_read_identity
+            )
+            if identity_value:
+                self._log(f"Added Identity characteristic: {self.IDENTITY_CHAR_UUID} (READ) with {len(identity_value)} bytes - Protocol v2", level="DEBUG")
+            else:
+                self._log(f"Added Identity characteristic: {self.IDENTITY_CHAR_UUID} (READ) with EMPTY value - will be updated when identity loads", level="WARNING")
 
             # Find and save TX characteristic for later notification sends
             # Characteristics are stored in order added: chr_id=1 (RX) is index 0, chr_id=2 (TX) is index 1
@@ -437,6 +474,25 @@ class BLEGATTServer:
             self._log(f"Failed to start GATT server: {error_type}: {e}", level="ERROR")
             self.running = False
             raise
+
+    def set_transport_identity(self, identity_hash: bytes):
+        """
+        Set the Transport identity hash for BLE Protocol v2.
+
+        This should be called after RNS.Transport is initialized and before
+        starting the GATT server (or early during startup).
+
+        Args:
+            identity_hash: 16-byte Reticulum Transport identity hash
+        """
+        if not isinstance(identity_hash, bytes):
+            raise TypeError(f"identity_hash must be bytes, got {type(identity_hash)}")
+
+        if len(identity_hash) != 16:
+            raise ValueError(f"identity_hash must be 16 bytes, got {len(identity_hash)}")
+
+        self.identity_hash = identity_hash
+        self._log(f"Transport identity set: {identity_hash.hex()}", level="INFO")
 
     async def stop(self):
         """

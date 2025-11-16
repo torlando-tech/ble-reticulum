@@ -40,7 +40,9 @@ import os
 import threading
 import time
 import asyncio
+import logging
 from collections import deque
+from typing import Optional
 
 # Add interface directory to path for importing other BLE modules
 # This is needed when loaded as external interface
@@ -96,80 +98,25 @@ except ImportError:
     except ImportError:
         HAS_GATT_SERVER = False
 
-# Check for bleak dependency
+# Import driver abstraction
 try:
-    import bleak
-    from bleak import BleakScanner, BleakClient
-    HAS_BLEAK = True
+    from bluetooth_driver import BLEDriverInterface, BLEDevice
 except ImportError:
-    HAS_BLEAK = False
+    from RNS.Interfaces.bluetooth_driver import BLEDriverInterface, BLEDevice
 
-# ============================================================================
-# Monkey patch for Bleak 1.1.1 BlueZ ServicesResolved race condition
-# ============================================================================
-# Issue: When connecting to BlueZ-based GATT servers (like bluezero), BlueZ
-#        sets ServicesResolved=True BEFORE services are fully exported to D-Bus
-# Cause: BlueZ GATT database cache timing issue (bluez/bluez#1489)
-# Impact: Bleak attempts to enumerate services before they're available,
-#         causing -5 (EIO) error and immediate disconnect
-# Fix: Poll D-Bus service map to verify services actually exist before proceeding
-# Status: Works with bluezero; proper fix should be in BlueZ or Bleak upstream
-# GitHub: https://github.com/hbldh/bleak/issues/1677
-# ============================================================================
-if HAS_BLEAK:
+# Import platform-specific driver (optional - can be overridden by subclasses)
+try:
+    from linux_bluetooth_driver import LinuxBluetoothDriver
+    HAS_LINUX_DRIVER = True
+except ImportError:
     try:
-        from bleak.backends.bluezdbus.manager import BlueZManager
+        from RNS.Interfaces.linux_bluetooth_driver import LinuxBluetoothDriver
+        HAS_LINUX_DRIVER = True
+    except ImportError:
+        HAS_LINUX_DRIVER = False
+        LinuxBluetoothDriver = None
 
-        # Store original method
-        _original_wait_for_services_discovery = BlueZManager._wait_for_services_discovery
-
-        async def _patched_wait_for_services_discovery(self, device_path: str) -> None:
-            """
-            Patched version that waits for services to actually appear in D-Bus.
-
-            Fixes race condition where ServicesResolved=True before services
-            are fully exported to D-Bus (common when connecting to BlueZ peripherals).
-            """
-            # Call original wait for ServicesResolved property
-            await _original_wait_for_services_discovery(self, device_path)
-
-            # Additional verification: Poll until services actually appear in D-Bus
-            max_attempts = 20  # 20 attempts * 100ms = 2 seconds max
-            retry_delay = 0.1  # 100ms between attempts
-
-            for attempt in range(max_attempts):
-                # Check if services are actually present in the service map
-                service_paths = self._service_map.get(device_path, set())
-
-                if service_paths and len(service_paths) > 0:
-                    # Services found! Verify at least one service has been fully loaded
-                    # by checking if it exists in the properties dictionary
-                    try:
-                        first_service_path = next(iter(service_paths))
-                        if first_service_path in self._properties:
-                            # Success: Services are actually in D-Bus
-                            RNS.log(f"BLE BlueZ timing fix: Services verified in D-Bus after {attempt * retry_delay:.2f}s", RNS.LOG_DEBUG)
-                            return
-                    except (StopIteration, KeyError):
-                        pass  # Service not ready yet
-
-                # Services not ready yet, wait before next check
-                if attempt < max_attempts - 1:  # Don't sleep on last attempt
-                    await asyncio.sleep(retry_delay)
-
-            # If we get here, services didn't appear within timeout
-            # Log warning but don't raise - let get_services() handle it
-            RNS.log(f"BLE BlueZ timing fix: Services not found in D-Bus after {max_attempts * retry_delay}s, proceeding anyway", RNS.LOG_WARNING)
-
-        # Apply the patch
-        BlueZManager._wait_for_services_discovery = _patched_wait_for_services_discovery
-
-        RNS.log("Applied Bleak 1.1.1 BlueZ ServicesResolved timing patch for bluezero compatibility", RNS.LOG_INFO)
-
-    except Exception as e:
-        # If patching fails, log warning but don't prevent interface from loading
-        RNS.log(f"Failed to apply Bleak BlueZ timing patch: {e}. Connections to bluezero peripherals may fail.", RNS.LOG_WARNING)
-
+HAS_DRIVER = True
 
 class DiscoveredPeer:
     """
@@ -269,12 +216,12 @@ class BLEInterface(Interface):
     - Auto-reconnects on connection loss
 
     THREADING MODEL:
-    - Main asyncio loop in separate thread (_run_async_loop)
+    - Driver owns async event loop in separate thread
     - LOCK ORDERING CONVENTION (to prevent deadlocks):
       1. peer_lock - ALWAYS acquire first for peer state access
       2. frag_lock - THEN acquire for fragmentation state
       NEVER acquire locks in reverse order! (HIGH #2: deadlock prevention)
-    - Uses asyncio.run_coroutine_threadsafe for cross-thread calls
+    - Driver callbacks invoked from driver thread
 
     MEMORY USAGE (per-peer overhead):
     - Fragmenter + Reassembler: ~400 bytes per peer
@@ -295,9 +242,10 @@ class BLEInterface(Interface):
     DEFAULT_IFAC_SIZE = 16
 
     # BLE-specific constants
-    SERVICE_UUID = "00000001-5824-4f48-9e1a-3b3e8f0c1234"  # Custom Reticulum BLE service
-    CHARACTERISTIC_RX_UUID = "00000002-5824-4f48-9e1a-3b3e8f0c1234"  # RX characteristic
-    CHARACTERISTIC_TX_UUID = "00000003-5824-4f48-9e1a-3b3e8f0c1234"  # TX characteristic
+    SERVICE_UUID = "37145b00-442d-4a94-917f-8f42c5da28e3"  # Custom Reticulum BLE service
+    CHARACTERISTIC_RX_UUID = "37145b00-442d-4a94-917f-8f42c5da28e5"  # RX characteristic
+    CHARACTERISTIC_TX_UUID = "37145b00-442d-4a94-917f-8f42c5da28e4"  # TX characteristic
+    CHARACTERISTIC_IDENTITY_UUID = "37145b00-442d-4a94-917f-8f42c5da28e6"  # Identity characteristic (Protocol v2)
 
     # Discovery and connection settings
     DISCOVERY_INTERVAL = 5.0  # seconds between discovery scans
@@ -316,6 +264,9 @@ class BLEInterface(Interface):
     FRAG_TYPE_END = 0x03
     FRAG_HEADER_SIZE = 5  # bytes: type(1) + sequence(2) + total(2)
 
+    # Platform-specific driver class (override in subclasses for different platforms)
+    driver_class = LinuxBluetoothDriver
+
     def __init__(self, owner, configuration):
         """
         Initialize BLE interface.
@@ -325,10 +276,10 @@ class BLEInterface(Interface):
             configuration: Dictionary or ConfigObj with interface settings
         """
         # Check dependencies
-        if not HAS_BLEAK:
+        if not HAS_DRIVER:
             raise ImportError(
-                "BLEInterface requires the 'bleak' library. "
-                "Install with: pip install bleak==1.1.1"
+                "BLEInterface requires the driver abstraction. "
+                "Ensure bluetooth_driver.py and linux_bluetooth_driver.py are available."
             )
 
         super().__init__()
@@ -347,7 +298,11 @@ class BLEInterface(Interface):
 
         # BLE configuration
         self.service_uuid = c.get("service_uuid", BLEInterface.SERVICE_UUID)
-        self.device_name = c.get("device_name", f"Reticulum-{RNS.Identity.full_hash(self.name.encode())[:4].hex()}")
+        # Device name for BLE advertising (optional, configurable via config file)
+        # Default is None (no device name) to save advertisement packet space (31-byte limit).
+        # Discovery is based on service UUID only. Identity is obtained from the Identity
+        # characteristic after connection. If set, keep it short (max 8 chars recommended).
+        self.device_name = c.get("device_name", None)
         self.discovery_interval = float(c.get("discovery_interval", BLEInterface.DISCOVERY_INTERVAL))
         self.max_peers = int(c.get("max_connections", BLEInterface.MAX_PEERS))
         self.min_rssi = int(c.get("min_rssi", BLEInterface.MIN_RSSI))
@@ -399,36 +354,51 @@ class BLEInterface(Interface):
         # State tracking
         self.peers = {}  # address -> (client, last_seen, mtu)
         self.peer_lock = threading.Lock()
-        self.spawned_interfaces = {}  # connection_id -> BLEPeerInterface
-                                       # connection_id format: "AA:BB:CC:DD:EE:FF-central" or "AA:BB:CC:DD:EE:FF-peripheral"
-                                       # Dual connections: Same peer has TWO interfaces (BitChat model)
 
-        # GATT server for peripheral mode
-        self.gatt_server = None
-        if self.enable_peripheral:
-            try:
-                self.gatt_server = BLEGATTServer(self, device_name=self.device_name)
-                # Set up callbacks for server events
-                self.gatt_server.on_data_received = self.handle_peripheral_data
-                self.gatt_server.on_central_connected = self.handle_central_connected
-                self.gatt_server.on_central_disconnected = self.handle_central_disconnected
-                RNS.log(f"{self} GATT server initialized for peripheral mode", RNS.LOG_DEBUG)
-                RNS.log(f"{self} registered peripheral callbacks: on_data_received={self.handle_peripheral_data.__name__}, on_central_connected={self.handle_central_connected.__name__}", RNS.LOG_DEBUG)
-            except Exception as e:
-                RNS.log(f"{self} Failed to initialize GATT server: {e}", RNS.LOG_ERROR)
-                self.gatt_server = None
-                self.enable_peripheral = False
+        # Identity-based interface tracking
+        self.spawned_interfaces = {}  # identity_hash (16 hex chars) -> BLEPeerInterface
+        self.address_to_identity = {}  # address -> peer_identity (16-byte identity)
+        self.identity_to_address = {}  # identity_hash -> address (for reverse lookup)
 
         # Fragmentation
         self.fragmenters = {}  # address -> BLEFragmenter (per MTU)
         self.reassemblers = {}  # address -> BLEReassembler
         self.frag_lock = threading.Lock()
 
-        # Async event loop (will be created in separate thread)
-        self.loop = None
-        self.loop_thread = None
-
         # Discovery state with prioritization
+
+        # Initialize BLE driver (uses class attribute, can be overridden by subclasses)
+        if self.driver_class is None:
+            raise ImportError(
+                "No BLE driver available. LinuxBluetoothDriver not found and no "
+                "driver_class override provided by subclass."
+            )
+
+        self.driver = self.driver_class(
+            discovery_interval=self.discovery_interval,
+            connection_timeout=self.connection_timeout,
+            min_rssi=self.min_rssi,
+            service_discovery_delay=self.service_discovery_delay,
+            max_peers=self.max_peers,
+            adapter_index=0  # TODO: Make configurable
+        )
+        RNS.log(f"{self} Using driver: {type(self.driver).__name__}", RNS.LOG_DEBUG)
+
+        # Set driver callbacks
+        self.driver.on_device_discovered = self._device_discovered_callback
+        self.driver.on_device_connected = self._device_connected_callback
+        self.driver.on_mtu_negotiated = self._mtu_negotiated_callback
+        self.driver.on_data_received = self._data_received_callback
+        self.driver.on_device_disconnected = self._device_disconnected_callback
+        self.driver.on_error = self._error_callback
+        self.driver.on_duplicate_identity_detected = self._check_duplicate_identity
+
+        # Redirect Python logging to RNS logging for proper formatting
+        self._setup_logging_redirect()
+
+        # Set driver power mode
+        self.driver.set_power_mode(self.power_mode)
+
         self.discovered_peers = {}  # address -> DiscoveredPeer
         self.connection_blacklist = {}  # address -> (blacklist_until_timestamp, failure_count)
         self.scanning = False
@@ -444,9 +414,6 @@ class BLEInterface(Interface):
         # Local adapter address (will be populated on first scan)
         self.local_address = None
 
-        # BlueZ version and capabilities (for LE-specific connection support)
-        self.bluez_version = self._detect_bluez_version()
-        self.has_connect_device = False  # Set to True if ConnectDevice() available
 
         RNS.log(f"{self} initializing with service UUID {self.service_uuid}", RNS.LOG_INFO)
         RNS.log(f"{self} power mode: {self.power_mode}, max peers: {self.max_peers}", RNS.LOG_DEBUG)
@@ -459,6 +426,12 @@ class BLEInterface(Interface):
         else:
             RNS.log(f"{self} local packet forwarding DISABLED (relies on Transport for propagation)", RNS.LOG_DEBUG)
 
+        # CRITICAL #2: Periodic cleanup task for stale reassembly buffers
+        # This prevents memory leaks from incomplete packet transmissions (disconnects, corrupted data)
+        # Runs every 30 seconds to clean up timed-out buffers
+        self.cleanup_timer = None
+        self._start_cleanup_timer()
+
         # Start the interface
         self.start()
 
@@ -466,33 +439,27 @@ class BLEInterface(Interface):
         """Start the BLE interface operations."""
         RNS.log(f"{self} starting BLE operations", RNS.LOG_INFO)
 
-        # Create and start async event loop in separate thread
-        self.loop_thread = threading.Thread(target=self._run_async_loop, daemon=True)
-        self.loop_thread.start()
-
-        # Wait for loop to initialize
-        max_wait = 5
-        waited = 0
-        while self.loop is None and waited < max_wait:
-            time.sleep(0.1)
-            waited += 0.1
-
-        if self.loop is None:
-            RNS.log(f"{self} failed to start async event loop", RNS.LOG_ERROR)
+        # Start the BLE driver
+        try:
+            self.driver.start(
+                service_uuid=self.service_uuid,
+                rx_char_uuid=BLEInterface.CHARACTERISTIC_RX_UUID,
+                tx_char_uuid=BLEInterface.CHARACTERISTIC_TX_UUID,
+                identity_char_uuid=BLEInterface.CHARACTERISTIC_IDENTITY_UUID
+            )
+            RNS.log(f"{self} driver started successfully", RNS.LOG_INFO)
+        except Exception as e:
+            RNS.log(f"{self} failed to start driver: {e}", RNS.LOG_ERROR)
             return
 
-        # Schedule discovery to start (if central mode enabled)
+        # If central mode is enabled, start scanning for peers
         if self.enable_central:
-            asyncio.run_coroutine_threadsafe(self._start_discovery(), self.loop)
-        else:
-            RNS.log(f"{self} central mode disabled, skipping peer discovery", RNS.LOG_INFO)
+            try:
+                self.driver.start_scanning()
+                RNS.log(f"{self} started scanning for peers", RNS.LOG_INFO)
+            except Exception as e:
+                RNS.log(f"{self} failed to start scanning: {e}", RNS.LOG_ERROR)
 
-        # Start GATT server if peripheral mode is enabled
-        if self.gatt_server:
-            asyncio.run_coroutine_threadsafe(self._start_server(), self.loop)
-
-        # Start periodic cleanup task (CRITICAL #2: prevent unbounded reassembly buffer growth)
-        asyncio.run_coroutine_threadsafe(self._periodic_cleanup(), self.loop)
 
         # Bug #13 workaround: Clear stale BLE paths from Transport.path_table
         # Reticulum core bug: Paths loaded from storage may have timestamp=0,
@@ -501,14 +468,123 @@ class BLEInterface(Interface):
         # TODO: Remove when upstream Transport.py is fixed (see session notes)
         self._clear_stale_ble_paths()
 
+        # Set interface online
         self.online = True
-        RNS.log(f"{self} started successfully", RNS.LOG_INFO)
+        RNS.log(f"{self} interface online", RNS.LOG_INFO)
 
-    def _run_async_loop(self):
-        """Run the asyncio event loop in a separate thread."""
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
-        self.loop.run_forever()
+    def final_init(self):
+        """
+        Interface lifecycle hook called AFTER interface is added to Transport.interfaces
+        but BEFORE Transport.start() loads Transport.identity.
+
+        Use this to start a background thread that waits for Transport.identity to be
+        loaded, then sets it on the driver and starts advertising.
+        """
+        if self.enable_peripheral:
+            RNS.log(f"{self} Launching driver advertising startup thread (will wait for Transport.identity)", RNS.LOG_DEBUG)
+            startup_thread = threading.Thread(target=self._start_advertising_when_identity_ready, daemon=True, name="BLE-Advertising-Startup")
+            startup_thread.start()
+
+    def _setup_logging_redirect(self):
+        """
+        Redirect Python logging from the BLE driver to RNS logging for consistent formatting.
+        Only redirects logs from 'root' logger (used by linux_bluetooth_driver), not from
+        underlying libraries like bleak, dbus_fast, etc.
+        """
+        class RNSLoggingHandler(logging.Handler):
+            def __init__(self, interface_name):
+                super().__init__()
+                self.interface_name = interface_name
+
+            def emit(self, record):
+                try:
+                    # Only process logs from root logger (linux_bluetooth_driver)
+                    # Ignore verbose logs from underlying libraries (bleak, dbus_fast, etc.)
+                    if record.name != 'root':
+                        return
+
+                    # Map Python logging levels to RNS log levels
+                    level_map = {
+                        logging.DEBUG: RNS.LOG_DEBUG,
+                        logging.INFO: RNS.LOG_INFO,
+                        logging.WARNING: RNS.LOG_WARNING,
+                        logging.ERROR: RNS.LOG_ERROR,
+                        logging.CRITICAL: RNS.LOG_CRITICAL
+                    }
+                    rns_level = level_map.get(record.levelno, RNS.LOG_INFO)
+
+                    # Format message
+                    message = self.format(record)
+
+                    # Log to RNS
+                    RNS.log(f"{self.interface_name} {message}", rns_level)
+                except Exception:
+                    # Silently fail if RNS logging fails (don't want to break the driver)
+                    pass
+
+        # Get root logger (used by linux_bluetooth_driver)
+        root_logger = logging.getLogger()
+
+        # Remove any existing stream handlers from root logger to prevent duplicate console output
+        for handler in root_logger.handlers[:]:
+            if isinstance(handler, logging.StreamHandler):
+                root_logger.removeHandler(handler)
+
+        # Only add handler if not already added (avoid duplicates)
+        handler_exists = any(isinstance(h, RNSLoggingHandler) for h in root_logger.handlers)
+        if not handler_exists:
+            handler = RNSLoggingHandler(str(self))
+            handler.setLevel(logging.INFO)  # Only INFO and above from driver
+            handler.setFormatter(logging.Formatter('%(message)s'))
+            root_logger.addHandler(handler)
+            root_logger.setLevel(logging.INFO)  # Don't capture DEBUG from libraries
+
+    def _start_advertising_when_identity_ready(self):
+        """
+        Background thread that waits for Transport.identity, sets it on driver,
+        then starts advertising. Times out after 60 seconds if identity doesn't load.
+        """
+        import RNS.Transport as Transport
+
+        attempt = 0
+        start_time = time.time()
+        timeout = 60.0  # 60 second timeout
+
+        RNS.log(f"{self} Waiting for Transport.identity to be loaded...", RNS.LOG_DEBUG)
+
+        # Poll until Transport.identity is available (with 60s timeout)
+        while time.time() - start_time < timeout:
+            attempt += 1
+
+            try:
+                if hasattr(Transport, 'identity') and Transport.identity:
+                    identity_hash = Transport.identity.hash
+                    if identity_hash and len(identity_hash) == 16:
+                        elapsed = time.time() - start_time
+                        RNS.log(f"{self} Transport.identity available after {elapsed:.1f}s", RNS.LOG_INFO)
+
+                        # Set identity on driver
+                        self.driver.set_identity(identity_hash)
+
+                        # Start advertising
+                        try:
+                            self.driver.start_advertising(self.device_name, identity_hash)
+                            if self.device_name:
+                                RNS.log(f"{self} Started advertising as {self.device_name}", RNS.LOG_INFO)
+                            else:
+                                RNS.log(f"{self} Started advertising (no device name)", RNS.LOG_INFO)
+                        except Exception as e:
+                            RNS.log(f"{self} Failed to start advertising: {e}", RNS.LOG_ERROR)
+
+                        return
+
+            except Exception as e:
+                RNS.log(f"{self} Error waiting for identity: {e}", RNS.LOG_DEBUG)
+
+            time.sleep(0.5)
+
+        RNS.log(f"{self} Timeout waiting for Transport.identity after {timeout}s", RNS.LOG_ERROR)
+
 
     def _clear_stale_ble_paths(self):
         """
@@ -566,248 +642,21 @@ class BLEInterface(Interface):
         except Exception as e:
             RNS.log(f"{self} Error during stale path cleanup (non-fatal): {e}", RNS.LOG_WARNING)
 
-    def _detect_bluez_version(self):
+    def _start_cleanup_timer(self):
         """
-        Detect BlueZ version from bluetoothctl command.
+        Start the periodic cleanup timer.
 
-        Returns:
-            tuple: Version tuple like (5, 84) or None if detection fails
+        CRITICAL #2: This timer prevents memory leaks from incomplete reassembly buffers
+        caused by peer disconnections or corrupted partial transmissions.
         """
-        try:
-            import subprocess
-            result = subprocess.run(
-                ['bluetoothctl', '--version'],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            version_str = result.stdout.strip().split()[-1]
-            version_tuple = tuple(map(int, version_str.split('.')))
-            RNS.log(f"{self} detected BlueZ version {version_str}", RNS.LOG_DEBUG)
+        if self.cleanup_timer:
+            self.cleanup_timer.cancel()
 
-            # Also log BlueZ configuration for pairing
-            self._log_bluez_config()
+        self.cleanup_timer = threading.Timer(30.0, self._periodic_cleanup_task)
+        self.cleanup_timer.daemon = True
+        self.cleanup_timer.start()
 
-            return version_tuple
-        except Exception as e:
-            RNS.log(f"{self} could not detect BlueZ version: {e}", RNS.LOG_DEBUG)
-            return None
-
-    def _log_bluez_config(self):
-        """Log relevant BlueZ configuration settings for BLE mesh networking."""
-        try:
-            with open('/etc/bluetooth/main.conf', 'r') as f:
-                config_content = f.read()
-
-            # Extract JustWorksRepairing setting
-            just_works = None
-            for line in config_content.split('\n'):
-                line = line.strip()
-                if line.startswith('JustWorksRepairing'):
-                    just_works = line.split('=')[1].strip()
-                    break
-
-            if just_works == 'always':
-                RNS.log(f"{self} BlueZ JustWorksRepairing: always (automatic pairing enabled for mesh)", RNS.LOG_INFO)
-            elif just_works == 'never' or just_works is None:
-                RNS.log(f"{self} BlueZ JustWorksRepairing: never (default - may cause pairing failures)", RNS.LOG_WARNING)
-                RNS.log(f"{self} Recommendation: Set JustWorksRepairing=always in /etc/bluetooth/main.conf for automatic mesh pairing", RNS.LOG_WARNING)
-            else:
-                RNS.log(f"{self} BlueZ JustWorksRepairing: {just_works}", RNS.LOG_DEBUG)
-
-        except FileNotFoundError:
-            RNS.log(f"{self} Could not read /etc/bluetooth/main.conf (not on Linux/BlueZ)", RNS.LOG_DEBUG)
-        except Exception as e:
-            RNS.log(f"{self} Could not read BlueZ config: {e}", RNS.LOG_DEBUG)
-
-    async def _connect_via_dbus_le(self, peer_address):
-        """
-        Connect to peer using D-Bus Adapter.ConnectDevice() with explicit LE type.
-
-        This method forces an LE (BLE) connection instead of BR/EDR, bypassing
-        BlueZ's default preference for BR/EDR on dual-mode devices.
-
-        Requirements:
-        - BlueZ >= 5.49 (when ConnectDevice was introduced)
-        - bluetoothd running with -E flag (experimental mode)
-
-        Args:
-            peer_address: BLE MAC address to connect to
-
-        Returns:
-            bool: True if ConnectDevice succeeded
-
-        Raises:
-            AttributeError: If ConnectDevice method not available
-            PermissionError: If experimental mode not enabled
-        """
-        from dbus_fast.aio import MessageBus
-        from dbus_fast import BusType, Variant
-
-        RNS.log(f"{self} attempting LE-specific connection via ConnectDevice()", RNS.LOG_DEBUG)
-
-        bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
-
-        # Get adapter interface
-        introspection = await bus.introspect('org.bluez', '/org/bluez/hci0')
-        adapter_obj = bus.get_proxy_object('org.bluez', '/org/bluez/hci0', introspection)
-        adapter_iface = adapter_obj.get_interface('org.bluez.Adapter1')
-
-        # Call ConnectDevice with LE parameters
-        # This explicitly specifies LE connection type
-        params = {
-            "Address": Variant("s", peer_address),
-            "AddressType": Variant("s", "public")  # Force LE public address type
-        }
-
-        # Call the experimental method
-        result = await adapter_iface.call_connect_device(params)
-
-        RNS.log(f"{self} ConnectDevice() succeeded for {peer_address}", RNS.LOG_DEBUG)
-        self.has_connect_device = True  # Mark as available for future use
-        return True
-
-    async def _get_local_adapter_address(self):
-        """
-        Get local Bluetooth adapter address reliably across platforms.
-
-        This function tries multiple methods to retrieve the adapter address:
-        1. Platform-specific scanner attribute (if available)
-        2. BlueZ D-Bus interface (Linux/BlueZ)
-
-        Returns:
-            str: Local BLE adapter MAC address, or None if unavailable
-        """
-        # Try BlueZ D-Bus approach for Linux
-        try:
-            from bleak.backends.bluezdbus import defs
-            from dbus_fast.aio import MessageBus
-            from dbus_fast import BusType
-
-            RNS.log(f"{self} attempting to get local adapter address via D-Bus", RNS.LOG_DEBUG)
-
-            # Connect to system bus
-            bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
-
-            # Try hci0 first (most common)
-            try:
-                introspection = await bus.introspect('org.bluez', '/org/bluez/hci0')
-                obj = bus.get_proxy_object('org.bluez', '/org/bluez/hci0', introspection)
-                adapter = obj.get_interface(defs.ADAPTER_INTERFACE)
-                properties_interface = obj.get_interface('org.freedesktop.DBus.Properties')
-                address = await properties_interface.call_get(defs.ADAPTER_INTERFACE, 'Address')
-
-                # Extract value from Variant object
-                if hasattr(address, 'value'):
-                    address = address.value
-
-                RNS.log(f"{self} local adapter address retrieved via D-Bus: {address}", RNS.LOG_INFO)
-                return address
-            except Exception as e:
-                RNS.log(f"{self} could not get address from hci0: {e}, trying to enumerate adapters", RNS.LOG_DEBUG)
-
-                # If hci0 fails, enumerate all adapters
-                introspection = await bus.introspect('org.bluez', '/')
-                obj = bus.get_proxy_object('org.bluez', '/', introspection)
-                object_manager = obj.get_interface('org.freedesktop.DBus.ObjectManager')
-                objects = await object_manager.call_get_managed_objects()
-
-                for path, interfaces in objects.items():
-                    if defs.ADAPTER_INTERFACE in interfaces:
-                        adapter_props = interfaces[defs.ADAPTER_INTERFACE]
-                        if 'Address' in adapter_props:
-                            address = adapter_props['Address']
-                            # Extract value from Variant object
-                            if hasattr(address, 'value'):
-                                address = address.value
-                            RNS.log(f"{self} local adapter address retrieved via D-Bus (path {path}): {address}", RNS.LOG_INFO)
-                            return address
-
-                RNS.log(f"{self} no adapters found via D-Bus enumeration", RNS.LOG_WARNING)
-        except ImportError:
-            RNS.log(f"{self} D-Bus not available (not on Linux/BlueZ)", RNS.LOG_DEBUG)
-        except Exception as e:
-            RNS.log(f"{self} D-Bus adapter address retrieval failed: {type(e).__name__}: {e}", RNS.LOG_DEBUG)
-
-        RNS.log(f"{self} could not get local adapter address, MAC-based connection direction preference disabled", RNS.LOG_WARNING)
-        return None
-
-    async def _start_discovery(self):
-        """Start BLE discovery process."""
-        RNS.log(f"{self} starting peer discovery", RNS.LOG_DEBUG)
-
-        # Get local adapter address before first scan (for MAC-based connection direction preference)
-        if self.local_address is None:
-            self.local_address = await self._get_local_adapter_address()
-            if self.local_address:
-                RNS.log(f"{self} connection direction preference enabled (local MAC: {self.local_address})", RNS.LOG_INFO)
-            else:
-                RNS.log(f"{self} connection direction preference disabled (could not get local MAC)", RNS.LOG_WARNING)
-
-        while self.online:
-            try:
-                # Saver mode: Skip scanning when we have connected peers
-                # This dramatically reduces CPU usage on low-power devices (Pi Zero)
-                skip_scan = False
-                if self.power_mode == BLEInterface.POWER_MODE_SAVER:
-                    with self.peer_lock:
-                        connected_count = len(self.peers)
-
-                    # If we have any connected peers, skip scanning
-                    if connected_count > 0:
-                        skip_scan = True
-                        RNS.log(f"{self} saver mode: skipping scan ({connected_count} connected peer(s))", RNS.LOG_DEBUG)
-
-                if not skip_scan:
-                    await self._discover_peers()
-
-                # Calculate sleep time based on power mode
-                if self.power_mode == BLEInterface.POWER_MODE_AGGRESSIVE:
-                    sleep_time = 1.0  # Fast discovery
-                elif self.power_mode == BLEInterface.POWER_MODE_SAVER:
-                    # Long sleep in saver mode, even longer if we skipped scan
-                    sleep_time = 60.0 if skip_scan else 30.0
-                else:  # BALANCED
-                    sleep_time = self.discovery_interval  # Default 5.0s
-
-                await asyncio.sleep(sleep_time)
-
-            except Exception as e:
-                RNS.log(f"{self} error in discovery loop: {e}", RNS.LOG_ERROR)
-                await asyncio.sleep(5)  # Back off on errors
-
-    async def _start_server(self):
-        """
-        Start GATT server for peripheral mode (non-blocking).
-
-        This method launches the server startup in the background and doesn't block
-        the interface initialization. If the server fails to start, the interface
-        continues in central-only mode.
-        """
-        if not self.gatt_server:
-            return
-
-        RNS.log(f"{self} starting GATT server in background", RNS.LOG_INFO)
-
-        # Start server in background with timeout
-        async def start_with_timeout():
-            try:
-                # Give server 10 seconds to start
-                await asyncio.wait_for(self.gatt_server.start(), timeout=10.0)
-                RNS.log(f"{self} GATT server started and advertising", RNS.LOG_INFO)
-            except asyncio.TimeoutError:
-                RNS.log(f"{self} GATT server startup timed out after 10s, disabling peripheral mode", RNS.LOG_WARNING)
-                self.gatt_server = None
-                self.enable_peripheral = False
-            except Exception as e:
-                RNS.log(f"{self} failed to start GATT server: {type(e).__name__}: {e}, disabling peripheral mode", RNS.LOG_WARNING)
-                self.gatt_server = None
-                self.enable_peripheral = False
-
-        # Fire and forget - don't wait for completion
-        asyncio.create_task(start_with_timeout())
-
-    async def _periodic_cleanup(self):
+    def _periodic_cleanup_task(self):
         """
         Periodically clean up stale reassembly buffers (CRITICAL #2: prevent memory leak)
 
@@ -816,173 +665,375 @@ class BLEInterface(Interface):
         memory indefinitely, leading to memory exhaustion on long-running instances
         (especially critical on Pi Zero with only 512MB RAM).
         """
-        while self.online:
-            await asyncio.sleep(30.0)  # Every 30 seconds
+        if not self.online:
+            return  # Don't reschedule if interface is offline
 
-            with self.frag_lock:
-                total_cleaned = 0
-                for peer_address, reassembler in list(self.reassemblers.items()):
-                    cleaned = reassembler.cleanup_stale_buffers()
-                    if cleaned > 0:
-                        total_cleaned += cleaned
-                        RNS.log(f"{self} cleaned {cleaned} stale reassembly buffer(s) for {peer_address}",
-                               RNS.LOG_DEBUG)
-
-                if total_cleaned > 0:
-                    RNS.log(f"{self} periodic cleanup: removed {total_cleaned} stale reassembly buffer(s) total",
-                           RNS.LOG_INFO)
-
-    async def _discover_peers(self):
-        """Scan for BLE peers advertising Reticulum service."""
-        if self.scanning:
-            return  # Already scanning
-
-        self.scanning = True
-
-        try:
-            # Use callback-based scanner for proper AdvertisementData access
-            # This avoids the deprecated device.metadata API
-            discovered_devices = []  # List of (device, advertisement_data) tuples
-
-            def detection_callback(device, advertisement_data):
-                """Callback invoked for each discovered BLE device."""
-                discovered_devices.append((device, advertisement_data))
-
-            # Scan duration based on power mode
-            # aggressive: 2.0s (thorough discovery)
-            # balanced: 1.0s (default)
-            # saver: 0.5s (quick scan, low CPU)
-            if self.power_mode == BLEInterface.POWER_MODE_AGGRESSIVE:
-                scan_time = 2.0
-            elif self.power_mode == BLEInterface.POWER_MODE_SAVER:
-                scan_time = 0.5  # Shorter scan for CPU reduction
-            else:  # BALANCED
-                scan_time = 1.0
-
-            RNS.log(f"{self} scanning for peers (scan_time={scan_time:.1f}s)...", RNS.LOG_EXTREME)
-
-            scanner = BleakScanner(detection_callback=detection_callback)
-            try:
-                await scanner.start()
-                await asyncio.sleep(scan_time)
-                await scanner.stop()
-            except Exception as e:
-                error_msg = str(e)
-                # Check for "Not Powered" or similar adapter power issues
-                if "No powered Bluetooth adapters" in error_msg or "Not Powered" in error_msg:
-                    RNS.log(f"{self} Bluetooth adapter is not powered!", RNS.LOG_ERROR)
-                    RNS.log(f"{self} Solution: Run 'bluetoothctl power on' or 'sudo rfkill unblock bluetooth'", RNS.LOG_ERROR)
-                    RNS.log(f"{self} See troubleshooting: https://github.com/torlando-tech/ble-reticulum#bluetooth-adapter-not-powered", RNS.LOG_ERROR)
-                    # Don't raise, just return - the discovery loop will retry
-                    self.scanning = False
-                    return
-                else:
-                    # Re-raise other errors
-                    raise
-
-            # Get local adapter address if we don't have it yet (for connection direction preference)
-            if self.local_address is None:
-                try:
-                    # Get the adapter address from the scanner
-                    # Note: This is platform-specific, may not work on all platforms
-                    if hasattr(scanner, '_adapter') and hasattr(scanner._adapter, 'address'):
-                        self.local_address = scanner._adapter.address
-                        RNS.log(f"{self} local adapter address: {self.local_address}", RNS.LOG_DEBUG)
-                except Exception as e:
-                    RNS.log(f"{self} could not get local adapter address: {e}, connection direction preference disabled", RNS.LOG_DEBUG)
-
-            # Process discovered devices
-            matching_peers = 0
-            now = time.time()
-
-            for device, adv_data in discovered_devices:
-                # Check if device matches our service (UUID or name fallback)
-                matched = False
-                match_method = None
-
-                # Primary: Match by service UUID (standard BLE discovery)
-                if self.service_uuid in adv_data.service_uuids:
-                    matched = True
-                    match_method = "service UUID"
-
-                # Fallback: Match by device name pattern
-                # This handles cases where bluezero/BlueZ don't include service UUID in advertisement
-                # Common reasons: advertisement packet size limit (31 bytes), BlueZ configuration
-                elif device.name and device.name.startswith("RNS-"):
-                    # Ensure it's not our own device (self-filtering)
-                    if device.name != self.device_name:
-                        matched = True
-                        match_method = "name pattern (fallback)"
-                        RNS.log(f"{self} ⚠ Matched {device.name} by name pattern (fallback)", RNS.LOG_DEBUG)
-
-                if matched:
-                    matching_peers += 1
-                    rssi = adv_data.rssi
-                    device_name = device.name or f"BLE-{device.address[-8:]}"
-
-                    # Log all matching peers at DEBUG level for visibility
-                    RNS.log(f"{self} found matching peer {device_name} ({device.address}) via {match_method}, "
-                            f"RSSI: {rssi}dBm (min: {self.min_rssi}dBm)", RNS.LOG_DEBUG)
-
-                    if rssi >= self.min_rssi:
-                        # Create or update DiscoveredPeer
-                        if device.address in self.discovered_peers:
-                            # Update existing peer's RSSI and timestamp
-                            self.discovered_peers[device.address].update_rssi(rssi)
-                            RNS.log(f"{self} updated peer {device_name} ({device.address}) RSSI: {rssi}dBm", RNS.LOG_EXTREME)
-                        else:
-                            # New peer discovered
-                            self.discovered_peers[device.address] = DiscoveredPeer(device.address, device_name, rssi)
-                            RNS.log(f"{self} discovered new peer {device_name} ({device.address}) RSSI: {rssi}dBm, "
-                                    f"total_discovered={len(self.discovered_peers)}", RNS.LOG_DEBUG)
-                    else:
-                        # Log rejection at DEBUG level (not EXTREME) so it's visible with --verbose
-                        RNS.log(f"{self} rejecting weak peer {device_name} ({device.address}) "
-                                f"RSSI: {rssi}dBm < min_rssi: {self.min_rssi}dBm", RNS.LOG_DEBUG)
-
-            RNS.log(f"{self} scan complete: {len(discovered_devices)} total devices, {matching_peers} matching service UUID, "
-                    f"{len(self.discovered_peers)} total discovered, {len(self.peers)} connected", RNS.LOG_DEBUG)
-
-            # After discovery, select and connect to best peers
-            selected_peers = self._select_peers_to_connect()
-            for peer in selected_peers:
-                await self._connect_to_peer(peer)
-
-            # Clean up old discoveries (not seen in 60 seconds)
-            stale_timeout = 60.0
-            stale = [addr for addr, peer in self.discovered_peers.items()
-                     if now - peer.last_seen > stale_timeout]
-            if stale:
-                RNS.log(f"{self} removing {len(stale)} stale peers not seen in {stale_timeout}s", RNS.LOG_DEBUG)
-                for addr in stale:
-                    RNS.log(f"{self} removing stale peer {self.discovered_peers[addr].name} ({addr})", RNS.LOG_EXTREME)
-                    del self.discovered_peers[addr]
-
-            # HIGH #4: Prune old peers if limit exceeded (prevent unbounded memory growth)
-            if len(self.discovered_peers) > self.max_discovered_peers:
-                # Remove oldest non-connected peers (those not in self.peers)
-                to_remove = []
-                with self.peer_lock:
-                    for addr, peer in self.discovered_peers.items():
-                        if addr not in self.peers:  # Not currently connected
-                            to_remove.append((peer.last_seen, addr, peer.name))
-
-                # Sort by last_seen and remove oldest 20%
-                to_remove.sort()
-                num_to_remove = max(1, len(to_remove) // 5)
-                for _, addr, name in to_remove[:num_to_remove]:
-                    del self.discovered_peers[addr]
-                    RNS.log(f"{self} pruned old peer {name} ({addr}) (discovery cache limit: {self.max_discovered_peers})",
+        with self.frag_lock:
+            total_cleaned = 0
+            for peer_address, reassembler in list(self.reassemblers.items()):
+                cleaned = reassembler.cleanup_stale_buffers()
+                if cleaned > 0:
+                    total_cleaned += cleaned
+                    RNS.log(f"{self} cleaned {cleaned} stale reassembly buffer(s) for {peer_address}",
                            RNS.LOG_DEBUG)
 
-        except PermissionError as e:
-            RNS.log(f"{self} permission denied during BLE scan: {e}. "
-                    f"Try running with elevated privileges or check Bluetooth permissions", RNS.LOG_ERROR)
+            if total_cleaned > 0:
+                RNS.log(f"{self} periodic cleanup: removed {total_cleaned} stale reassembly buffer(s) total",
+                           RNS.LOG_INFO)
+
+        # Reschedule for next cleanup cycle
+        self._start_cleanup_timer()
+
+    def _device_discovered_callback(self, device: BLEDevice):
+        """
+        Driver callback: Handle discovered BLE device.
+
+        This callback is invoked by the driver when a device is discovered during scanning.
+        We use peer scoring and connection logic to decide whether to connect.
+        """
+        # Primary: Match by service UUID (standard BLE discovery)
+        if self.service_uuid not in device.service_uuids:
+            RNS.log(f"{self} device {device.name if device.name else device.address} does not advertise Reticulum service UUID, skipping", RNS.LOG_EXTREME)
+            return
+
+        # Validate RSSI - skip devices with invalid/sentinel values
+        if device.rssi in (-127, -128, 0):
+            RNS.log(f"{self} skipping {device.name or device.address} ({device.address}): invalid sentinel RSSI {device.rssi} dBm", RNS.LOG_DEBUG)
+            return
+
+        # Update or create discovered peer entry
+        if device.address not in self.discovered_peers:
+            self.discovered_peers[device.address] = DiscoveredPeer(
+                address=device.address,
+                name=device.name,
+                rssi=device.rssi
+            )
+        else:
+            self.discovered_peers[device.address].update_rssi(device.rssi)
+
+        # Prune discovery cache if needed (HIGH #4)
+        if len(self.discovered_peers) > self.max_discovered_peers:
+            # Remove oldest entries by last_seen timestamp
+            sorted_peers = sorted(
+                self.discovered_peers.items(),
+                key=lambda x: x[1].last_seen
+            )
+            to_remove = sorted_peers[:-self.max_discovered_peers]
+            for addr, _ in to_remove:
+                del self.discovered_peers[addr]
+
+        # Decide whether to connect based on peer scoring
+        peers_to_connect = self._select_peers_to_connect()
+        if device.address in [p.address for p in peers_to_connect]:
+            # Record connection attempt BEFORE calling driver.connect()
+            # This prevents rapid-fire retries if discovery callback fires again
+            if device.address in self.discovered_peers:
+                self.discovered_peers[device.address].record_connection_attempt()
+
+            # Initiate connection via driver
+            try:
+                self.driver.connect(device.address)
+            except Exception as e:
+                RNS.log(f"{self} failed to initiate connection to {device.name}: {e}", RNS.LOG_ERROR)
+
+    def _device_connected_callback(self, address: str, peer_identity: Optional[bytes]):
+        """
+        Driver callback: Handle successful device connection.
+
+        Called when driver has established a connection. For central connections,
+        the peer_identity is provided. For peripheral connections, identity will
+        arrive later via handshake.
+
+        Args:
+            address: MAC address of connected peer
+            peer_identity: 16-byte identity hash (None for peripheral connections)
+        """
+        role = self.driver.get_peer_role(address)
+
+        if peer_identity is not None:
+            # Central mode: identity provided by driver
+            if len(peer_identity) == 16:
+                identity_hash = self._compute_identity_hash(peer_identity)
+
+                # Store identity mappings
+                self.address_to_identity[address] = peer_identity
+                self.identity_to_address[identity_hash] = address
+
+                RNS.log(f"{self} connected to {address} as CENTRAL, received identity: {identity_hash}", RNS.LOG_INFO)
+                self._record_connection_success(address)
+            else:
+                RNS.log(f"{self} invalid identity from {address} (wrong length), disconnecting", RNS.LOG_WARNING)
+                self.driver.disconnect(address)
+                self._record_connection_failure(address)
+
+        elif role == "peripheral":
+            # Peripheral mode: identity will arrive via handshake
+            RNS.log(f"{self} connected to {address} as PERIPHERAL, waiting for identity handshake...", RNS.LOG_INFO)
+            # The identity will be received in `_data_received_callback`
+
+        else:
+            RNS.log(f"{self} connected to {address}, but identity not provided and role is {role}. Disconnecting.", RNS.LOG_WARNING)
+            self.driver.disconnect(address)
+
+    def _check_duplicate_identity(self, address: str, peer_identity: bytes) -> bool:
+        """
+        Driver callback: Check if peer identity already exists under a different MAC.
+
+        This handles Android MAC randomization where the same device advertises
+        with one MAC but connects with a different MAC.
+
+        Args:
+            address: MAC address attempting to connect
+            peer_identity: 16-byte identity hash of the peer
+
+        Returns:
+            True if this identity is already connected via a different MAC (abort connection)
+            False if this is a new identity or same MAC (allow connection)
+        """
+        if not peer_identity or len(peer_identity) != 16:
+            return False
+
+        identity_hash = self._compute_identity_hash(peer_identity)
+        existing_address = self.identity_to_address.get(identity_hash)
+
+        if existing_address and existing_address != address:
+            # Same identity, different MAC - this is Android MAC rotation
+            RNS.log(
+                f"{self} duplicate identity detected: {identity_hash[:8]} already connected via {existing_address}, "
+                f"rejecting connection from {address} (Android MAC rotation)",
+                RNS.LOG_WARNING
+            )
+            return True
+
+        # Either new identity or same MAC - allow connection
+        return False
+
+    def _mtu_negotiated_callback(self, address: str, mtu: int):
+        """
+        Driver callback: Handle MTU negotiation completion.
+
+        Creates or updates the fragmenter for this peer with the negotiated MTU.
+        """
+        RNS.log(f"{self} MTU negotiated with {address}: {mtu} bytes", RNS.LOG_INFO)
+
+        # Get peer identity
+        peer_identity = self.address_to_identity.get(address)
+        if not peer_identity:
+            RNS.log(f"{self} no identity for {address}, cannot create fragmenter", RNS.LOG_WARNING)
+            return
+
+        # Create or update fragmenter
+        frag_key = self._get_fragmenter_key(peer_identity, address)
+
+        with self.frag_lock:
+            # Create fragmenter with MTU
+            self.fragmenters[frag_key] = BLEFragmenter(mtu=mtu)
+
+            # Create reassembler if not exists
+            if frag_key not in self.reassemblers:
+                self.reassemblers[frag_key] = BLEReassembler()
+
+        # Spawn peer interface if not exists
+        identity_hash = self._compute_identity_hash(peer_identity)
+        if identity_hash not in self.spawned_interfaces:
+            # Get peer name from discovered peers
+            peer_name = None
+            if address in self.discovered_peers:
+                peer_name = self.discovered_peers[address].name
+            else:
+                peer_name = f"BLE-{address[-8:]}"
+
+            # Determine connection type based on MAC sorting
+            connection_type = "central"
+            if self.driver.get_local_address():
+                local_mac = self.driver.get_local_address().lower()
+                peer_mac = address.lower()
+                if local_mac > peer_mac:
+                    connection_type = "peripheral"
+
+            self._spawn_peer_interface(
+                address=address,
+                name=peer_name,
+                peer_identity=peer_identity,
+                mtu=mtu,
+                connection_type=connection_type
+            )
+
+    def _handle_identity_handshake(self, address: str, data: bytes) -> bool:
+        """
+        Handle identity handshake from central device (peripheral role only).
+
+        When a central connects to us (we're peripheral), it sends exactly 16 bytes
+        as the first packet - its identity hash. This allows the peripheral to learn
+        the central's identity without requiring discovery/scanning.
+
+        Args:
+            address: MAC address of the central device
+            data: Received data bytes
+
+        Returns:
+            True if data was handled as identity handshake, False otherwise
+        """
+        # Check if we already have peer identity
+        peer_identity = self.address_to_identity.get(address)
+        if peer_identity:
+            return False  # Already have identity, not a handshake
+
+        # Identity handshake detection: exactly 16 bytes, no existing identity
+        if len(data) != 16:
+            return False  # Not a handshake
+
+        try:
+            # Store central's identity
+            central_identity = bytes(data)
+            identity_hash = self._compute_identity_hash(central_identity)
+
+            self.address_to_identity[address] = central_identity
+            self.identity_to_address[identity_hash] = address
+
+            RNS.log(f"{self} received identity handshake from {address}: {identity_hash}", RNS.LOG_INFO)
+
+            # Get MTU for this connection (should be negotiated by now)
+            mtu = self.driver.get_peer_mtu(address)
+            if not mtu:
+                mtu = 23  # BLE 4.0 minimum MTU
+
+            # Create fragmenter/reassembler
+            frag_key = self._get_fragmenter_key(central_identity, address)
+
+            with self.frag_lock:
+                self.fragmenters[frag_key] = BLEFragmenter(mtu=mtu)
+                if frag_key not in self.reassemblers:
+                    self.reassemblers[frag_key] = BLEReassembler()
+
+            # Spawn peer interface if not already spawned
+            if identity_hash not in self.spawned_interfaces:
+                peer_name = f"Central-{address[-8:]}"
+                connection_type = "peripheral"  # We're the peripheral
+
+                self._spawn_peer_interface(
+                    address=address,
+                    name=peer_name,
+                    peer_identity=central_identity,
+                    mtu=mtu,
+                    connection_type=connection_type
+                )
+
+            RNS.log(f"{self} identity handshake complete for {address}", RNS.LOG_INFO)
+            return True  # Handshake processed successfully
+
         except Exception as e:
-            error_type = type(e).__name__
-            RNS.log(f"{self} error during peer discovery: {error_type}: {e}", RNS.LOG_ERROR)
-        finally:
-            self.scanning = False
+            RNS.log(f"{self} failed to process identity handshake from {address}: {e}", RNS.LOG_ERROR)
+            return True  # Still consumed the data, don't pass it on
+
+    def _data_received_callback(self, address: str, data: bytes):
+        """
+        Driver callback: Handle received data from peer.
+
+        First checks for identity handshake (peripheral role), then passes
+        normal data to reassembly and routing logic.
+        """
+        # Handle identity handshake if applicable
+        if self._handle_identity_handshake(address, data):
+            return  # Handshake handled, done
+
+        # Normal data processing
+        self._handle_ble_data(address, data)
+
+    def _device_disconnected_callback(self, address: str):
+        """
+        Driver callback: Handle device disconnection.
+
+        Cleans up peer state, interfaces, and fragmentation buffers.
+        """
+        RNS.log(f"{self} disconnected from {address}", RNS.LOG_INFO)
+
+        # Clean up peer connection state
+        with self.peer_lock:
+            if address in self.peers:
+                del self.peers[address]
+
+        # Detach interface
+        peer_identity = self.address_to_identity.get(address)
+        if peer_identity:
+            identity_hash = self._compute_identity_hash(peer_identity)
+            if identity_hash in self.spawned_interfaces:
+                peer_if = self.spawned_interfaces[identity_hash]
+                peer_if.detach()
+                del self.spawned_interfaces[identity_hash]
+                RNS.log(f"{self} detached interface for {address}", RNS.LOG_DEBUG)
+
+            # Clean up identity mappings to prevent stale connections
+            if address in self.address_to_identity:
+                del self.address_to_identity[address]
+                RNS.log(f"{self} cleaned up address_to_identity for {address}", RNS.LOG_DEBUG)
+            if identity_hash in self.identity_to_address:
+                del self.identity_to_address[identity_hash]
+                RNS.log(f"{self} cleaned up identity_to_address for {identity_hash}", RNS.LOG_DEBUG)
+
+        # Clean up fragmenter/reassembler
+        if peer_identity:
+            frag_key = self._get_fragmenter_key(peer_identity, address)
+            with self.frag_lock:
+                if frag_key in self.fragmenters:
+                    del self.fragmenters[frag_key]
+                if frag_key in self.reassemblers:
+                    del self.reassemblers[frag_key]
+
+    def _error_callback(self, severity: str, message: str, exc: Exception = None):
+        """
+        Driver callback: Handle driver errors.
+
+        Logs errors with appropriate severity level. Some errors are downgraded
+        to debug level if they're expected race conditions that are handled gracefully.
+
+        Also triggers blacklist mechanism for connection failures to prevent
+        infinite retry loops with MAC address randomization.
+        """
+        # Check for race condition errors that should be downgraded to DEBUG
+        should_blacklist = False
+        if exc and severity == "error":
+            exc_str = str(exc)
+            # "Operation already in progress" - race condition from concurrent connection attempts
+            # This should no longer happen with our fixes, but if it does, it's not a critical error
+            if "Operation already in progress" in exc_str or "In Progress" in exc_str:
+                severity = "debug"
+                log_level = RNS.LOG_DEBUG
+            # "br-connection-canceled" - BR/EDR fallback was attempted but canceled
+            # This is expected behavior when ConnectDevice() retry happens
+            elif "br-connection-canceled" in exc_str:
+                severity = "debug"
+                log_level = RNS.LOG_DEBUG
+            else:
+                log_level = RNS.LOG_ERROR
+                should_blacklist = True
+        elif severity == "critical":
+            log_level = RNS.LOG_CRITICAL
+        elif severity == "error":
+            log_level = RNS.LOG_ERROR
+            should_blacklist = True
+        elif severity == "warning":
+            log_level = RNS.LOG_WARNING
+            # Connection timeouts should also trigger blacklist
+            if "Connection timeout" in message:
+                should_blacklist = True
+        else:
+            log_level = RNS.LOG_DEBUG
+
+        if exc:
+            RNS.log(f"{self} driver {severity}: {message} - {type(exc).__name__}: {exc}", log_level)
+        else:
+            RNS.log(f"{self} driver {severity}: {message}", log_level)
+
+        # Extract address from connection failure messages and trigger blacklist
+        if should_blacklist:
+            import re
+            # Match patterns like "Connection failed to XX:XX:XX:XX:XX:XX:" or "Connection timeout to XX:XX:XX:XX:XX:XX"
+            match = re.search(r'(?:Connection (?:failed|timeout) to|to) ([0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2})', message)
+            if match:
+                address = match.group(1).upper()
+                RNS.log(f"{self} recording connection failure for {address} to activate blacklist", RNS.LOG_INFO)
+                self._record_connection_failure(address)
 
     def _score_peer(self, peer):
         """
@@ -1032,6 +1083,11 @@ class BLEInterface(Interface):
                   - Poor peer: 0 (RSSI) + 0 (history) + 0 (old) = 0
         """
         score = 0.0
+
+        # Validate RSSI - reject peers with invalid/sentinel values
+        if peer.rssi is None or peer.rssi in (-127, -128, 0):
+            RNS.log(f"{self} peer {peer.address} has invalid RSSI {peer.rssi}, returning minimum score", RNS.LOG_DEBUG)
+            return 0.0
 
         # Signal strength component (0-100 points)
         # RSSI typically ranges from -30 (excellent) to -100 (poor)
@@ -1110,6 +1166,57 @@ class BLEInterface(Interface):
             # Skip if already connected
             if address in self.peers:
                 continue
+
+            # Skip if connection is already in progress
+            if hasattr(self.driver, '_connecting_peers'):
+                with self.driver._connecting_lock:
+                    if address in self.driver._connecting_peers:
+                        # Diagnostic: Show ALL addresses currently being connected to
+                        all_connecting = list(self.driver._connecting_peers)
+                        RNS.log(f"{self} [v2.2] skipping {peer.name} ({address}) - connection already in progress",
+                                RNS.LOG_DEBUG)
+                        RNS.log(f"{self} [DIAGNOSTIC] Currently connecting to {len(all_connecting)} address(es): {all_connecting}",
+                                RNS.LOG_INFO)
+                        continue
+
+            # Rate limiting: Skip if we recently attempted connection to this peer
+            time_since_attempt = time.time() - peer.last_connection_attempt
+            if peer.last_connection_attempt > 0 and time_since_attempt < 5.0:
+                RNS.log(f"{self} [v2.2] skipping {peer.name} - connection attempted {time_since_attempt:.1f}s ago (rate limit: 5s)",
+                        RNS.LOG_DEBUG)
+                continue
+
+            # Protocol v2.2: Skip if interface exists for this identity (any connection type)
+            # This prevents dual connections (central + peripheral to same peer)
+            peer_identity = self.address_to_identity.get(address)
+            if peer_identity:
+                identity_hash = self._compute_identity_hash(peer_identity)
+                if identity_hash in self.spawned_interfaces:
+                    RNS.log(f"{self} [v2.2] skipping {peer.name} - interface exists for identity {identity_hash[:8]}",
+                            RNS.LOG_DEBUG)
+                    continue
+
+            # Protocol v2.2: MAC address sorting - deterministic connection direction
+            # Lower MAC initiates (central), higher MAC only accepts (peripheral)
+            # This prevents simultaneous connection attempts from both sides
+            if self.local_address is not None:
+                try:
+                    # Normalize addresses (remove colons)
+                    my_mac = self.local_address.replace(":", "")
+                    peer_mac = address.replace(":", "")
+
+                    my_mac_int = int(my_mac, 16)
+                    peer_mac_int = int(peer_mac, 16)
+
+                    if my_mac_int > peer_mac_int:
+                        # Our MAC is higher - let them connect to us (we stay peripheral only)
+                        RNS.log(f"{self} [v2.2] skipping {peer.name} (MAC {address[:17]}) - "
+                                f"connection direction: they initiate (lower MAC connects to higher)",
+                                RNS.LOG_DEBUG)
+                        continue
+                except (ValueError, AttributeError) as e:
+                    # MAC parsing failed - fall through to normal connection logic
+                    RNS.log(f"{self} MAC sorting failed for {peer.name}: {e}", RNS.LOG_DEBUG)
 
             # Skip if blacklisted
             if self._is_blacklisted(address):
@@ -1212,316 +1319,89 @@ class BLEInterface(Interface):
                 self.connection_blacklist[address] = (blacklist_until, peer.failed_connections)
                 RNS.log(f"{self} blacklisted {peer.name} for {blacklist_duration:.0f}s after {peer.failed_connections} failures", RNS.LOG_WARNING)
 
-    async def _connect_to_peer(self, peer):
-        """
-        Attempt to connect to a discovered peer.
+                # Clean up BlueZ device state after blacklisting to prevent persistent errors
+                # This ensures that when the blacklist expires, the device can reconnect cleanly
+                if hasattr(self.driver, '_remove_bluez_device'):
+                    try:
+                        import asyncio
+                        # Run cleanup in driver's event loop with timeout
+                        future = asyncio.run_coroutine_threadsafe(
+                            self.driver._remove_bluez_device(address),
+                            self.driver.loop
+                        )
+                        # Wait up to 5 seconds for cleanup to complete
+                        cleanup_result = future.result(timeout=5.0)
+                        if cleanup_result:
+                            RNS.log(f"{self} cleaned up BlueZ device state for blacklisted peer {address}", RNS.LOG_DEBUG)
+                    except Exception as e:
+                        RNS.log(f"{self} device cleanup failed for blacklisted peer {address}: {e}", RNS.LOG_DEBUG)
 
-        This method handles:
-        - Connection attempt tracking
-        - Success/failure recording
-        - Blacklist management
-        - BLE client setup
-        - Peer interface creation
+    def _get_fragmenter_key(self, peer_identity, peer_address):
+        """
+        Compute fragmenter/reassembler dictionary key using full identity hash.
 
         Args:
-            peer: DiscoveredPeer object to connect to
+            peer_identity: 16-byte peer identity
+            peer_address: BLE MAC address (unused, kept for compatibility)
+
+        Returns:
+            str: Full 16-byte identity as 32 hex characters
         """
-        # Check if already connected (either as central or if they connected to us as peripheral)
-        with self.peer_lock:
-            if peer.address in self.peers:
-                RNS.log(f"{self} already connected to {peer.name} (central mode)", RNS.LOG_EXTREME)
-                return
+        return peer_identity.hex()
 
-            # Dual-connection mode (BitChat model): Always attempt central connection
-            # Both devices connect to each other, creating TWO interfaces per peer:
-            #   - "address-central" (we connect to their peripheral)
-            #   - "address-peripheral" (they connect to our peripheral)
-            # Reticulum Transport handles deduplication if packets sent on both paths
-
-            # Skip if we're trying to connect to ourselves
-            if self.local_address and peer.address == self.local_address:
-                RNS.log(f"{self} skipping connection to self ({peer.address})", RNS.LOG_DEBUG)
-                return
-
-            # Check if we already have a CENTRAL connection to this peer
-            conn_id = f"{peer.address}-central"
-            if conn_id in self.spawned_interfaces:
-                RNS.log(f"{self} already connected to {peer.name} as central", RNS.LOG_EXTREME)
-                return
-
-        # Record connection attempt
-        peer.record_connection_attempt()
-
-        # Attempt connection
-        try:
-            RNS.log(f"{self} connecting to {peer.name} ({peer.address}) "
-                    f"RSSI: {peer.rssi}dBm, success_rate: {peer.get_success_rate():.0%}, "
-                    f"attempt {peer.connection_attempts + 1}", RNS.LOG_DEBUG)
-
-            # Create disconnection callback for diagnostic logging
-            def disconnected_callback(client_obj):
-                """Called when BlueZ reports the device has disconnected"""
-                RNS.log(f"{self} BLE client for {peer.name} ({peer.address}) disconnected unexpectedly", RNS.LOG_WARNING)
-
-                # Clean up all peer state atomically (CRITICAL #1: memory leak fix)
-                # This prevents fragmentation state from leaking when peers disconnect mid-transmission
-
-                # 1. Clean up peer connection state
-                with self.peer_lock:
-                    if peer.address in self.peers:
-                        del self.peers[peer.address]
-
-                # 2. Clean up fragmentation state (prevent memory leak)
-                with self.frag_lock:
-                    if peer.address in self.fragmenters:
-                        del self.fragmenters[peer.address]
-                        RNS.log(f"{self} cleaned up fragmenter for {peer.address}", RNS.LOG_DEBUG)
-                    if peer.address in self.reassemblers:
-                        del self.reassemblers[peer.address]
-                        RNS.log(f"{self} cleaned up reassembler for {peer.address}", RNS.LOG_DEBUG)
-
-                # 3. Detach spawned interface (central connection)
-                conn_id = f"{peer.address}-central"
-                if conn_id in self.spawned_interfaces:
-                    self.spawned_interfaces[conn_id].detach()
-                    del self.spawned_interfaces[conn_id]
-                    RNS.log(f"{self} cleaned up spawned interface for {peer.address}", RNS.LOG_DEBUG)
-
-            # Try LE-specific connection if BlueZ >= 5.49 and we haven't confirmed ConnectDevice unavailable
-            le_connection_attempted = False
-            if self.bluez_version and self.bluez_version >= (5, 49) and not self.has_connect_device:
-                try:
-                    # Attempt D-Bus ConnectDevice with explicit LE type
-                    # This bypasses BlueZ's BR/EDR priority for dual-mode devices
-                    await self._connect_via_dbus_le(peer.address)
-                    le_connection_attempted = True
-                    RNS.log(f"{self} LE-specific connection initiated for {peer.name}", RNS.LOG_DEBUG)
-                except (AttributeError, PermissionError, Exception) as e:
-                    # ConnectDevice not available (experimental mode disabled or unsupported)
-                    RNS.log(f"{self} ConnectDevice() unavailable ({type(e).__name__}), falling back to standard connection", RNS.LOG_DEBUG)
-                    self.has_connect_device = False  # Don't try again
-
-            # Create BleakClient
-            client = BleakClient(peer.address, disconnected_callback=disconnected_callback)
-
-            # Connect (either complete the LE connection or do standard connection)
-            if not le_connection_attempted:
-                await client.connect(timeout=self.connection_timeout)
-            else:
-                # Device already connected via ConnectDevice(), just set up bleak's state
-                try:
-                    await client.connect(timeout=5.0)  # Shorter timeout since device should be connected
-                except Exception as e:
-                    # If this fails, ConnectDevice didn't actually connect the device
-                    RNS.log(f"{self} ConnectDevice() didn't establish connection, falling back", RNS.LOG_DEBUG)
-                    await client.connect(timeout=self.connection_timeout)
-
-            if client.is_connected:
-                # bluezero D-Bus registration delay
-                # bluezero registers characteristics asynchronously with BlueZ D-Bus.
-                # We need to wait for registration to complete before discovering services.
-                if self.service_discovery_delay > 0:
-                    RNS.log(f"{self} connection established, waiting {self.service_discovery_delay}s for bluezero D-Bus registration", RNS.LOG_INFO)
-                    await asyncio.sleep(self.service_discovery_delay)
-                else:
-                    RNS.log(f"{self} connection established, no service discovery delay configured", RNS.LOG_DEBUG)
-
-                # Service discovery diagnostics
-                try:
-                    RNS.log(f"{self} discovering services for {peer.name} ({peer.address})...", RNS.LOG_DEBUG)
-
-                    discovery_start = time.time()
-
-                    # Bleak 1.1.1: Try new services property first
-                    services = list(client.services) if client.services else []
-
-                    # Fallback: If services property is empty, force discovery with deprecated method
-                    # This is needed for bluezero GATT servers where automatic discovery doesn't complete
-                    if not services:
-                        RNS.log(f"{self} services property empty, forcing discovery with get_services()", RNS.LOG_DEBUG)
-                        services_collection = await client.get_services()
-                        services = list(services_collection)
-
-                    discovery_time = time.time() - discovery_start
-
-                    RNS.log(f"{self} service discovery completed in {discovery_time:.3f}s, found {len(services)} services", RNS.LOG_DEBUG)
-
-                    # Find Reticulum service
-                    reticulum_service = None
-                    for svc in services:
-                        target_uuid = self.service_uuid.lower()
-                        svc_uuid = svc.uuid.lower()
-
-                        if svc_uuid == target_uuid:
-                            reticulum_service = svc
-                            RNS.log(f"{self} found Reticulum service with {len(svc.characteristics)} characteristics", RNS.LOG_DEBUG)
-                            break
-
-                    if not reticulum_service:
-                        RNS.log(f"{self} Reticulum service not found (expected UUID: {self.service_uuid}, will retry)", RNS.LOG_WARNING)
-
-                except Exception as e:
-                    RNS.log(f"{self} service discovery failed: {type(e).__name__}: {e} (will retry)", RNS.LOG_WARNING)
-
-                # Get negotiated MTU
-                try:
-                    # For BlueZ backend, acquire MTU first to avoid warning
-                    # This queries D-Bus for the actual negotiated MTU value
-                    if hasattr(client, '_backend') and hasattr(client._backend, '_acquire_mtu'):
-                        try:
-                            await client._backend._acquire_mtu()
-                            RNS.log(f"{self} acquired MTU from BlueZ D-Bus for {peer.name}", RNS.LOG_EXTREME)
-                        except Exception as e:
-                            RNS.log(f"{self} failed to acquire MTU via D-Bus: {e}, will use default", RNS.LOG_DEBUG)
-
-                    mtu = client.mtu_size
-                    RNS.log(f"{self} negotiated MTU {mtu} with {peer.name}", RNS.LOG_DEBUG)
-                except Exception as e:
-                    RNS.log(f"{self} could not get MTU from {peer.name}, using default 23: {type(e).__name__}: {e}", RNS.LOG_WARNING)
-                    mtu = 23  # BLE 4.0 minimum
-
-                with self.peer_lock:
-                    self.peers[peer.address] = (client, time.time(), mtu)
-
-                # Create fragmenter for this peer's MTU
-                with self.frag_lock:
-                    self.fragmenters[peer.address] = BLEFragmenter(mtu=mtu)
-                    self.reassemblers[peer.address] = BLEReassembler(timeout=self.connection_timeout)
-
-                # Create spawned peer interface
-                self._spawn_peer_interface(peer.address, peer.name)
-
-                # Set up notification handler for incoming data
-                RNS.log(f"{self} setting up TX characteristic notifications for {peer.name}...", RNS.LOG_INFO)
-                notification_success = False
-                max_retries = 3
-                retry_delays = [0.2, 0.5, 1.0]  # Exponential backoff
-
-                for attempt in range(max_retries):
-                    try:
-                        if attempt > 0:
-                            # Wait before retry
-                            await asyncio.sleep(retry_delays[attempt - 1])
-                            RNS.log(f"{self} retrying notification setup for {peer.name} (attempt {attempt + 1}/{max_retries})", RNS.LOG_DEBUG)
-
-                        RNS.log(f"{self} calling start_notify() for TX characteristic (attempt {attempt + 1})...", RNS.LOG_INFO)
-
-                        await client.start_notify(
-                            BLEInterface.CHARACTERISTIC_TX_UUID,
-                            lambda sender, data: self._handle_ble_data(peer.address, data)
-                        )
-
-                        notification_success = True
-                        RNS.log(f"{self} ✓ notification setup SUCCEEDED on attempt {attempt + 1} for {peer.name}", RNS.LOG_INFO)
-                        break  # Success, exit retry loop
-
-                    except (EOFError, KeyError) as e:
-                        # EOFError/KeyError typically indicate GATT services not discovered/ready yet
-                        if attempt < max_retries - 1:
-                            error_name = type(e).__name__
-                            RNS.log(f"{self} GATT services not ready for {peer.name}, will retry ({error_name})", RNS.LOG_DEBUG)
-                            continue  # Try again
-                        else:
-                            error_name = type(e).__name__
-                            RNS.log(f"{self} failed to start notifications for {peer.name} after {max_retries} attempts: {error_name} (GATT services may not be fully discovered, will retry connection)", RNS.LOG_WARNING)
-                    except Exception as e:
-                        # Other errors are not retryable
-                        RNS.log(f"{self} failed to start notifications for {peer.name}: {type(e).__name__}: {e} (will retry connection)", RNS.LOG_WARNING)
-                        break  # Don't retry non-service-discovery exceptions
-
-                # If notification setup failed after all retries, clean up
-                if not notification_success:
-                    # Clean up the failed connection
-                    with self.peer_lock:
-                        if peer.address in self.peers:
-                            del self.peers[peer.address]
-                    with self.frag_lock:
-                        if peer.address in self.fragmenters:
-                            del self.fragmenters[peer.address]
-                        if peer.address in self.reassemblers:
-                            del self.reassemblers[peer.address]
-                    # Clean up central connection peer interface
-                    conn_id = f"{peer.address}-central"
-                    if conn_id in self.spawned_interfaces:
-                        self.spawned_interfaces[conn_id].detach()
-                        del self.spawned_interfaces[conn_id]
-                    await client.disconnect()
-                    # Record failure and return (don't raise exception)
-                    self._record_connection_failure(peer.address)
-                    return
-
-                # Record success
-                self._record_connection_success(peer.address)
-
-                RNS.log(f"{self} connected to {peer.name} ({peer.address}), "
-                        f"MTU={mtu}, total_peers={len(self.peers)}/{self.max_peers}", RNS.LOG_INFO)
-
-        except asyncio.TimeoutError as e:
-            # Connection timeout - likely peer moved out of range or is busy
-            self._record_connection_failure(peer.address)
-            RNS.log(f"{self} connection timeout to {peer.name} ({peer.address}) "
-                    f"after {self.connection_timeout}s, failures={peer.failed_connections}", RNS.LOG_WARNING)
-        except PermissionError as e:
-            # Permission denied - need special permissions on this platform
-            self._record_connection_failure(peer.address)
-            RNS.log(f"{self} permission denied connecting to {peer.name}: {e}. "
-                    f"Try running with elevated privileges or check Bluetooth permissions", RNS.LOG_ERROR)
-        except Exception as e:
-            # Other errors - hardware issues, invalid address, etc.
-            self._record_connection_failure(peer.address)
-            error_type = type(e).__name__
-
-            # Special handling for BR/EDR vs LE connection errors
-            error_str = str(e)
-            if "BREDR.ProfileUnavailable" in error_str or "No more profiles to connect to" in error_str:
-                # BlueZ is trying BR/EDR instead of LE
-                version_str = f"{self.bluez_version[0]}.{self.bluez_version[1]}" if self.bluez_version else "unknown"
-                RNS.log(f"{self} BR/EDR connection failed to {peer.name} (BLE GATT device). BlueZ is "
-                        f"prioritizing BR/EDR over LE. BlueZ version: {version_str}", RNS.LOG_WARNING)
-
-                if self.bluez_version and self.bluez_version >= (5, 49):
-                    RNS.log(f"{self} To enable LE-specific connections on BlueZ {version_str}:", RNS.LOG_WARNING)
-                    RNS.log(f"{self}   1. Enable experimental mode: sudo systemctl edit bluetooth", RNS.LOG_WARNING)
-                    RNS.log(f"{self}      Add: ExecStart=", RNS.LOG_WARNING)
-                    RNS.log(f"{self}      Add: ExecStart=/usr/lib/bluetooth/bluetoothd -E", RNS.LOG_WARNING)
-                    RNS.log(f"{self}   2. Restart: sudo systemctl restart bluetooth", RNS.LOG_WARNING)
-                else:
-                    RNS.log(f"{self} Alternative: Set target device to LE-only mode in /etc/bluetooth/main.conf", RNS.LOG_WARNING)
-
-            else:
-                # Standard error logging
-                RNS.log(f"{self} failed to connect to {peer.name} ({peer.address}): "
-                        f"{error_type}: {e}, failures={peer.failed_connections}", RNS.LOG_WARNING)
-
-    def _spawn_peer_interface(self, address, name, connection_type="central"):
+    def _compute_identity_hash(self, peer_identity):
         """
-        Create a spawned peer interface for a connected device.
+        Compute 16-character hex identity hash for interface tracking.
+
+        Args:
+            peer_identity: 16-byte peer identity
+
+        Returns:
+            str: Identity hash (16 hex chars)
+        """
+        return RNS.Identity.full_hash(peer_identity)[:16].hex()[:16]
+
+    def _spawn_peer_interface(self, address, name, peer_identity, client=None, mtu=None, connection_type="central"):
+        """
+        Create a peer interface for a BLE connection.
 
         Args:
             address: BLE address of peer
             name: Name of peer device
+            peer_identity: 16-byte peer identity
+            client: BleakClient instance (for central connections)
+            mtu: Negotiated MTU (for central connections)
             connection_type: "central" (we connected to them) or "peripheral" (they connected to us)
+
+        Returns:
+            BLEPeerInterface: The spawned interface
         """
-        conn_id = f"{address}-{connection_type}"
+        # Compute lookup key using identity hash
+        identity_hash = self._compute_identity_hash(peer_identity)
 
-        if conn_id in self.spawned_interfaces:
-            return  # Already spawned
+        # Check if interface already exists (MAC sorting should prevent this)
+        if identity_hash in self.spawned_interfaces:
+            RNS.log(f"{self} interface already exists for {name} ({identity_hash[:8]}), reusing", RNS.LOG_WARNING)
+            return self.spawned_interfaces[identity_hash]
 
-        peer_if = BLEPeerInterface(self, address, name)
+        # Create new peer interface
+        peer_if = BLEPeerInterface(self, address, name, peer_identity)
         peer_if.OUT = self.OUT
         peer_if.IN = self.IN
         peer_if.parent_interface = self
         peer_if.bitrate = self.bitrate
         peer_if.HW_MTU = self.HW_MTU
         peer_if.online = True
-        peer_if.connection_type = connection_type
-        peer_if.is_peripheral_connection = (connection_type == "peripheral")
 
         # Register with transport
         RNS.Transport.interfaces.append(peer_if)
-        self.spawned_interfaces[conn_id] = peer_if
 
-        RNS.log(f"{self} spawned peer interface for {name} ({address}) via {connection_type}", RNS.LOG_DEBUG)
+        # Store in tracking dict
+        self.spawned_interfaces[identity_hash] = peer_if
+
+        RNS.log(f"{self} created peer interface for {name} ({identity_hash[:8]}), type={connection_type}", RNS.LOG_INFO)
+
+        return peer_if
 
     def _handle_ble_data(self, peer_address, data):
         """
@@ -1531,6 +1411,23 @@ class BLEInterface(Interface):
             peer_address: Address of peer that sent data
             data: Raw bytes received (might be fragment)
         """
+        RNS.log(f"{self} received {len(data)} bytes from peer {peer_address}", RNS.LOG_EXTREME)
+
+        # Filter 1-byte keep-alive packets from Columba (Android) peers
+        # Columba sends 0x00 every 15 seconds to prevent Android BLE supervision timeout
+        if len(data) == 1 and data[0] == 0x00:
+            RNS.log(f"{self} received keep-alive from peer {peer_address}, ignoring", RNS.LOG_EXTREME)
+            return
+
+        # Look up peer identity to compute fragmenter key
+        peer_identity = self.address_to_identity.get(peer_address)
+        if not peer_identity:
+            RNS.log(f"{self} no identity for peer {peer_address}, dropping data", RNS.LOG_WARNING)
+            return
+
+        # Compute identity-based fragmenter key (matches peripheral data handler)
+        frag_key = self._get_fragmenter_key(peer_identity, peer_address)
+
         # Attempt reassembly
         complete_packet = None
         peer_name = None
@@ -1538,9 +1435,10 @@ class BLEInterface(Interface):
         # HIGH #2: Lock ordering - get reassembler reference with frag_lock, release before processing
         # This prevents holding frag_lock during reassembly which could block other threads
         with self.frag_lock:
-            if peer_address not in self.reassemblers:
-                return  # No reassembler for this peer
-            reassembler = self.reassemblers[peer_address]
+            if frag_key not in self.reassemblers:
+                RNS.log(f"{self} no reassembler for {peer_address} (key: {frag_key[:16]}), dropping data", RNS.LOG_WARNING)
+                return
+            reassembler = self.reassemblers[frag_key]
 
         # Process fragment without holding lock (reassemblers are per-peer, no contention)
         try:
@@ -1556,15 +1454,16 @@ class BLEInterface(Interface):
 
                 # Log fragmentation statistics for this peer
                 stats = reassembler.get_statistics()
-                # Try to get peer name from either connection type
-                central_id = f"{peer_address}-central"
-                periph_id = f"{peer_address}-peripheral"
-                if central_id in self.spawned_interfaces:
-                    peer_name = self.spawned_interfaces[central_id].peer_name
-                elif periph_id in self.spawned_interfaces:
-                    peer_name = self.spawned_interfaces[periph_id].peer_name
-                else:
-                    peer_name = peer_address[-8:]
+                # Get peer name from interface lookup
+                peer_identity = self.address_to_identity.get(peer_address, None)
+
+                peer_name = peer_address[-8:]  # Default to address
+                if peer_identity:
+                    identity_hash = self._compute_identity_hash(peer_identity)
+                    peer_if = self.spawned_interfaces.get(identity_hash, None)
+                    if peer_if:
+                        peer_name = peer_if.peer_name
+
                 RNS.log(f"{self} reassembled packet from {peer_name}: "
                         f"total_packets={stats['packets_reassembled']}, "
                         f"total_fragments={stats['fragments_received']}, "
@@ -1575,10 +1474,21 @@ class BLEInterface(Interface):
             RNS.log(f"{self} error reassembling fragment from {peer_address}: {type(e).__name__}: {e}", RNS.LOG_ERROR)
             return
 
-        # If we have a complete packet, pass to peer interface (central connection)
-        conn_id = f"{peer_address}-central"
-        if complete_packet and conn_id in self.spawned_interfaces:
-            self.spawned_interfaces[conn_id].process_incoming(complete_packet)
+        # If we have a complete packet, route to peer interface
+        if complete_packet:
+            peer_identity = self.address_to_identity.get(peer_address, None)
+
+            if not peer_identity:
+                RNS.log(f"{self} no identity for peer {peer_address}, packet dropped", RNS.LOG_WARNING)
+                return
+
+            identity_hash = self._compute_identity_hash(peer_identity)
+            peer_if = self.spawned_interfaces.get(identity_hash, None)
+
+            if peer_if:
+                peer_if.process_incoming(complete_packet)
+            else:
+                RNS.log(f"{self} no interface found for peer {peer_address}, packet dropped", RNS.LOG_WARNING)
 
     def handle_peripheral_data(self, data, sender_address):
         """
@@ -1592,133 +1502,129 @@ class BLEInterface(Interface):
         """
         RNS.log(f"{self} received {len(data)} bytes from central {sender_address}", RNS.LOG_EXTREME)
 
-        # If sender not in peers, create peer state (peripheral connection)
-        conn_id = f"{sender_address}-peripheral"
-        if conn_id not in self.spawned_interfaces:
-            # Create peer interface for this central
-            self._create_peripheral_peer(sender_address)
+        # Filter 1-byte keep-alive packets from Columba (Android) peers
+        # Columba sends 0x00 every 15 seconds to prevent Android BLE supervision timeout
+        if len(data) == 1 and data[0] == 0x00:
+            RNS.log(f"{self} received keep-alive from central {sender_address}, ignoring", RNS.LOG_EXTREME)
+            return
 
-        # Update fragmenter MTU if GATT server has learned a new MTU
-        # (MTU is provided by BlueZ in write callback options)
-        if self.gatt_server and hasattr(self.gatt_server, 'get_central_mtu'):
-            current_mtu = self.gatt_server.get_central_mtu(sender_address)
-            with self.frag_lock:
-                if sender_address in self.fragmenters:
-                    existing_mtu = self.fragmenters[sender_address].mtu
-                    if current_mtu != existing_mtu:
-                        RNS.log(f"{self} updating fragmenter MTU for {sender_address}: {existing_mtu} -> {current_mtu}", RNS.LOG_INFO)
-                        self.fragmenters[sender_address] = BLEFragmenter(mtu=current_mtu)
+        # Check if we have peer identity
+        peer_identity = self.address_to_identity.get(sender_address)
+
+        # Identity handshake detection: If no identity and exactly 16 bytes, treat as handshake
+        # Protocol: Central sends its 16-byte identity hash as first packet after connection
+        if not peer_identity and len(data) == 16:
+            try:
+                # Store central's identity
+                central_identity = bytes(data)
+                central_identity_hash = RNS.Identity.full_hash(central_identity)[:16].hex()[:16]
+
+                self.address_to_identity[sender_address] = central_identity
+                self.identity_to_address[central_identity_hash] = sender_address
+
+                RNS.log(f"{self} received identity handshake from central {sender_address}: {central_identity_hash}", RNS.LOG_INFO)
+                RNS.log(f"{self} stored identity mapping for {sender_address}", RNS.LOG_DEBUG)
+
+                # Create peer interface and fragmenter/reassembler now that we have identity
+                self._spawn_peer_interface(
+                    address=sender_address,
+                    name=f"Central-{sender_address[-8:]}",
+                    peer_identity=central_identity,
+                    client=None,  # No client for peripheral connections
+                    mtu=None,  # MTU managed by GATT server
+                    connection_type="peripheral"
+                )
+
+                # Create fragmenter/reassembler for this peer
+                frag_key = self._get_fragmenter_key(central_identity, sender_address)
+                with self.frag_lock:
+                    # Use default MTU for peripheral connections (GATT server manages MTU)
+                    # The actual MTU will be determined by the central device
+                    mtu = 23  # BLE 4.0 minimum MTU
+                    self.fragmenters[frag_key] = BLEFragmenter(mtu=mtu)
+                    self.reassemblers[frag_key] = BLEReassembler(timeout=self.connection_timeout)
+                RNS.log(f"{self} created fragmenter/reassembler for central (key: {frag_key[:16]})", RNS.LOG_DEBUG)
+
+                return  # Handshake processed, done
+            except Exception as e:
+                RNS.log(f"{self} failed to process identity handshake from {sender_address}: {type(e).__name__}: {e}", RNS.LOG_ERROR)
+                return
+
+        # If still no identity after handshake check, drop the data
+        if not peer_identity:
+            RNS.log(f"{self} no identity for central {sender_address}, dropping data", RNS.LOG_WARNING)
+            return
+
+        # Get fragmenter key
+        frag_key = self._get_fragmenter_key(peer_identity, sender_address)
 
         # Attempt reassembly
         complete_packet = None
-
         with self.frag_lock:
-            if sender_address not in self.reassemblers:
-                # Create reassembler for this peer
-                self.reassemblers[sender_address] = BLEReassembler(timeout=self.connection_timeout)
-
-            try:
-                # Ensure data is bytes (bluezero may pass different types)
-                data_bytes = bytes(data) if not isinstance(data, bytes) else data
-                complete_packet = self.reassemblers[sender_address].receive_fragment(data_bytes, sender_address)
-
-                # Periodic cleanup
-                if complete_packet:
-                    cleaned = self.reassemblers[sender_address].cleanup_stale_buffers()
-                    if cleaned > 0:
-                        RNS.log(f"{self} cleaned {cleaned} stale reassembly buffers for central {sender_address}", RNS.LOG_DEBUG)
-
-                    # Log fragmentation statistics for this central
-                    stats = self.reassemblers[sender_address].get_statistics()
-                    # Try to get peer name from either connection type
-                    central_id = f"{sender_address}-central"
-                    periph_id = f"{sender_address}-peripheral"
-                    if central_id in self.spawned_interfaces:
-                        peer_name = self.spawned_interfaces[central_id].peer_name
-                    elif periph_id in self.spawned_interfaces:
-                        peer_name = self.spawned_interfaces[periph_id].peer_name
-                    else:
-                        peer_name = sender_address[-8:]
-                    RNS.log(f"{self} reassembled packet from {peer_name}: "
-                            f"total_packets={stats['packets_reassembled']}, "
-                            f"total_fragments={stats['fragments_received']}, "
-                            f"pending={stats['pending_packets']}, "
-                            f"timeouts={stats['packets_timeout']}", RNS.LOG_DEBUG)
-
-            except Exception as e:
-                RNS.log(f"{self} error reassembling fragment from central {sender_address}: {type(e).__name__}: {e}", RNS.LOG_ERROR)
+            if frag_key not in self.reassemblers:
+                RNS.log(f"{self} no reassembler for {sender_address}, dropping data", RNS.LOG_WARNING)
                 return
 
-        # If we have a complete packet, pass to peer interface (peripheral connection)
-        conn_id = f"{sender_address}-peripheral"
-        if complete_packet and conn_id in self.spawned_interfaces:
-            RNS.log(f"{self} DIAGNOSTIC: Calling process_incoming() on {conn_id} with {len(complete_packet)} bytes", RNS.LOG_DEBUG)
-            self.spawned_interfaces[conn_id].process_incoming(complete_packet)
-            RNS.log(f"{self} DIAGNOSTIC: process_incoming() completed for {conn_id}", RNS.LOG_DEBUG)
-        elif complete_packet and conn_id not in self.spawned_interfaces:
-            RNS.log(f"{self} DIAGNOSTIC: Complete packet ready but peer {conn_id} not in spawned_interfaces!", RNS.LOG_WARNING)
-        elif not complete_packet:
-            RNS.log(f"{self} DIAGNOSTIC: No complete packet yet from {sender_address} (waiting for more fragments)", RNS.LOG_DEBUG)
+            reassembler = self.reassemblers[frag_key]
 
-    def _create_peripheral_peer(self, address):
-        """
-        Create a peer interface for a central device connected to our GATT server.
+        try:
+            # Ensure data is bytes (bluezero may pass different types)
+            data_bytes = bytes(data) if not isinstance(data, bytes) else data
+            complete_packet = reassembler.receive_fragment(data_bytes, sender_address)
 
-        Args:
-            address: BLE address of the central device
-        """
-        conn_id = f"{address}-peripheral"
+            # Periodic cleanup
+            if complete_packet:
+                cleaned = reassembler.cleanup_stale_buffers()
+                if cleaned > 0:
+                    RNS.log(f"{self} cleaned {cleaned} stale reassembly buffers for {sender_address}", RNS.LOG_DEBUG)
 
-        if conn_id in self.spawned_interfaces:
-            return  # Already exists
+        except Exception as e:
+            RNS.log(f"{self} error reassembling fragment from {sender_address}: {type(e).__name__}: {e}", RNS.LOG_ERROR)
+            return
 
-        # Create peer interface
-        peer_if = BLEPeerInterface(self, address, f"Central-{address[-8:]}")
-        peer_if.OUT = self.OUT
-        peer_if.IN = self.IN
-        peer_if.parent_interface = self
-        peer_if.bitrate = self.bitrate
-        peer_if.HW_MTU = self.HW_MTU
-        peer_if.online = True
-        peer_if.connection_type = "peripheral"
-        peer_if.is_peripheral_connection = True
+        # Route complete packet to interface
+        if complete_packet:
+            identity_hash = self._compute_identity_hash(peer_identity)
+            peer_if = self.spawned_interfaces.get(identity_hash)
 
-        # Register with transport
-        RNS.Transport.interfaces.append(peer_if)
-        self.spawned_interfaces[conn_id] = peer_if
-
-        # Create fragmenter using negotiated MTU from GATT server (if available)
-        # Fragmenters are keyed by ADDRESS (shared between central and peripheral connections)
-        with self.frag_lock:
-            if address not in self.fragmenters:
-                # Query GATT server for negotiated MTU
-                mtu = 185  # Default fallback
-                if self.gatt_server and hasattr(self.gatt_server, 'get_central_mtu'):
-                    mtu = self.gatt_server.get_central_mtu(address)
-                    RNS.log(f"{self} using negotiated MTU {mtu} for peripheral connection from {address}", RNS.LOG_DEBUG)
-                else:
-                    RNS.log(f"{self} GATT server doesn't support MTU query, using default {mtu}", RNS.LOG_DEBUG)
-
-                self.fragmenters[address] = BLEFragmenter(mtu=mtu)
-
-        RNS.log(f"{self} created peer interface for central {address} (MTU: {mtu}) via peripheral", RNS.LOG_DEBUG)
+            if peer_if:
+                peer_if.process_incoming(complete_packet)
+            else:
+                RNS.log(f"{self} no interface for {sender_address}, packet dropped", RNS.LOG_WARNING)
 
     def handle_central_connected(self, address):
         """
         Handle a central device connecting to our GATT server.
 
-        This method creates the peer interface IMMEDIATELY to enable the
-        peripheral connection check in _connect_to_peer() to work properly.
-        This prevents duplicate central connection attempts from both sides.
+        With the unified interface architecture, this either creates a new interface
+        or adds a peripheral connection to an existing interface for this peer.
 
         Args:
             address: BLE address of the central device
         """
-        RNS.log(f"{self} central {address} connected to our peripheral, creating peer interface immediately", RNS.LOG_INFO)
+        RNS.log(f"{self} central {address} connected to our peripheral", RNS.LOG_INFO)
 
-        # Create peer interface immediately (not on first data)
-        # This ensures the peripheral connection check in _connect_to_peer() works
-        self._create_peripheral_peer(address)
+        # Look up peer identity
+        # Identity should be available via:
+        #   1. Discovery: If we previously scanned and discovered this central
+        #   2. Handshake: Central will send 16-byte identity as first write to RX characteristic
+        # At this point (connection established), we may not have identity yet - it arrives via handshake
+        peer_identity = self.address_to_identity.get(address, None)
+
+        if not peer_identity:
+            RNS.log(f"{self} peer identity not yet available for {address} (will be provided via handshake)", RNS.LOG_DEBUG)
+            # Don't create interface yet - wait for identity handshake in handle_peripheral_data()
+            return
+
+        # Create peer interface with peripheral connection
+        self._spawn_peer_interface(
+            address=address,
+            name=f"Central-{address[-8:]}",
+            peer_identity=peer_identity,
+            client=None,  # No client for peripheral connections
+            mtu=None,  # MTU managed by GATT server
+            connection_type="peripheral"
+        )
 
     def handle_central_disconnected(self, address):
         """
@@ -1729,26 +1635,38 @@ class BLEInterface(Interface):
         """
         RNS.log(f"{self} central disconnected: {address}", RNS.LOG_INFO)
 
-        # Clean up peripheral peer interface (they connected to us)
-        conn_id = f"{address}-peripheral"
-        if conn_id in self.spawned_interfaces:
-            peer_if = self.spawned_interfaces[conn_id]
-            peer_if.detach()
-            del self.spawned_interfaces[conn_id]
-            RNS.log(f"{self} cleaned up peripheral peer interface for {address}", RNS.LOG_DEBUG)
+        # Look up peer identity
+        peer_identity = self.address_to_identity.get(address, None)
 
-        # Only clean up shared fragmenter/reassembler if NO connections remain to this peer
-        # Check if central connection still exists
-        central_conn_id = f"{address}-central"
-        if central_conn_id not in self.spawned_interfaces:
-            # No central connection either - safe to clean up shared state
+        if not peer_identity:
+            RNS.log(f"{self} no identity for disconnected central {address}", RNS.LOG_WARNING)
+            return
+
+        # Find and detach interface
+        identity_hash = self._compute_identity_hash(peer_identity)
+        if identity_hash in self.spawned_interfaces:
+            peer_if = self.spawned_interfaces[identity_hash]
+            peer_if.detach()
+            del self.spawned_interfaces[identity_hash]
+            RNS.log(f"{self} detached interface for {address}", RNS.LOG_DEBUG)
+
+            # Clean up identity mappings to prevent stale connections
+            if address in self.address_to_identity:
+                del self.address_to_identity[address]
+                RNS.log(f"{self} cleaned up address_to_identity for {address}", RNS.LOG_DEBUG)
+            if identity_hash in self.identity_to_address:
+                del self.identity_to_address[identity_hash]
+                RNS.log(f"{self} cleaned up identity_to_address for {identity_hash}", RNS.LOG_DEBUG)
+
+            # Clean up fragmenter/reassembler
+            frag_key = self._get_fragmenter_key(peer_identity, address)
             with self.frag_lock:
-                if address in self.reassemblers:
-                    del self.reassemblers[address]
-                    RNS.log(f"{self} cleaned up reassembler for {address} (no connections remain)", RNS.LOG_DEBUG)
-                if address in self.fragmenters:
-                    del self.fragmenters[address]
-                    RNS.log(f"{self} cleaned up fragmenter for {address} (no connections remain)", RNS.LOG_DEBUG)
+                if frag_key in self.reassemblers:
+                    del self.reassemblers[frag_key]
+                    RNS.log(f"{self} cleaned up reassembler for {address}", RNS.LOG_DEBUG)
+                if frag_key in self.fragmenters:
+                    del self.fragmenters[frag_key]
+                    RNS.log(f"{self} cleaned up fragmenter for {address}", RNS.LOG_DEBUG)
 
     def process_incoming(self, data):
         """
@@ -1799,36 +1717,10 @@ class BLEInterface(Interface):
         RNS.log(f"{self} detaching interface", RNS.LOG_INFO)
         self.online = False
 
-        # MEDIUM #4: Graceful shutdown - wait for operations to complete before stopping event loop
-
-        # Stop GATT server gracefully
-        if self.gatt_server:
-            try:
-                future = asyncio.run_coroutine_threadsafe(self.gatt_server.stop(), self.loop)
-                future.result(timeout=5.0)  # Wait for graceful shutdown
-                RNS.log(f"{self} GATT server stopped", RNS.LOG_DEBUG)
-            except Exception as e:
-                RNS.log(f"{self} error stopping GATT server: {e}", RNS.LOG_ERROR)
-
-        # Disconnect all peers gracefully
-        disconnect_futures = []
-        with self.peer_lock:
-            for address, (client, last_seen, mtu) in list(self.peers.items()):
-                try:
-                    future = asyncio.run_coroutine_threadsafe(client.disconnect(), self.loop)
-                    disconnect_futures.append((address, future))
-                except Exception as e:
-                    RNS.log(f"{self} error scheduling disconnect for {address}: {e}", RNS.LOG_ERROR)
-
-            self.peers.clear()
-
-        # Wait for all disconnections (with timeout)
-        for address, future in disconnect_futures:
-            try:
-                future.result(timeout=2.0)
-                RNS.log(f"{self} disconnected from {address}", RNS.LOG_DEBUG)
-            except Exception as e:
-                RNS.log(f"{self} disconnect timeout for {address}: {e}", RNS.LOG_WARNING)
+        # Cancel periodic cleanup timer
+        if self.cleanup_timer:
+            self.cleanup_timer.cancel()
+            self.cleanup_timer = None
 
         # Detach spawned interfaces
         for peer_if in list(self.spawned_interfaces.values()):
@@ -1840,11 +1732,12 @@ class BLEInterface(Interface):
             self.fragmenters.clear()
             self.reassemblers.clear()
 
-        # NOW safe to stop event loop (all operations completed)
-        if self.loop:
-            self.loop.call_soon_threadsafe(self.loop.stop)
-            # Give it a moment to actually stop
-            time.sleep(0.1)
+        # Stop the driver (handles graceful disconnection and cleanup)
+        try:
+            self.driver.stop()
+            RNS.log(f"{self} driver stopped", RNS.LOG_DEBUG)
+        except Exception as e:
+            RNS.log(f"{self} error stopping driver: {e}", RNS.LOG_ERROR)
 
         RNS.log(f"{self} detached", RNS.LOG_INFO)
 
@@ -1871,7 +1764,7 @@ class BLEPeerInterface(Interface):
     interfaces for routing and statistics tracking.
     """
 
-    def __init__(self, parent, peer_address, peer_name):
+    def __init__(self, parent, peer_address, peer_name, peer_identity=None):
         """
         Initialize peer interface.
 
@@ -1879,15 +1772,17 @@ class BLEPeerInterface(Interface):
             parent: Parent BLEInterface
             peer_address: BLE address of peer
             peer_name: Name of peer device
+            peer_identity: 16-byte peer identity from GATT characteristic (optional, can be set later)
+
+        Note: Connection type (central vs peripheral) and MTU are now managed by the driver.
         """
         super().__init__()
 
         self.parent_interface = parent
         self.peer_address = peer_address
         self.peer_name = peer_name
+        self.peer_identity = peer_identity  # 16-byte identity for stable tracking
         self.online = True
-        self.connection_type = "central"  # Will be set by creator ("central" or "peripheral")
-        self.is_peripheral_connection = False  # Will be set by creator based on connection_type
 
         # Copy settings from parent
         self.HW_MTU = parent.HW_MTU
@@ -1899,7 +1794,7 @@ class BLEPeerInterface(Interface):
         # Announce rate limiting (required by Transport.inbound announce processing)
         self.announce_rate_target = None  # No announce rate limiting for BLE peer interfaces
 
-        RNS.log(f"BLEPeerInterface initialized for {peer_name} ({peer_address})", RNS.LOG_DEBUG)
+        RNS.log(f"BLEPeerInterface initialized for {peer_name} ({peer_address}), identity={'set' if peer_identity else 'pending'}", RNS.LOG_DEBUG)
 
     def process_incoming(self, data):
         """
@@ -1915,15 +1810,8 @@ class BLEPeerInterface(Interface):
             # Log packet reception
             RNS.log(f"{self} RX: {len(data)} bytes from {self.peer_name}", RNS.LOG_DEBUG)
 
-            # DIAGNOSTIC: Log before calling Transport
-            RNS.log(f"DIAGNOSTIC: Calling owner.inbound() with {len(data)} bytes on interface {self}", RNS.LOG_DEBUG)
-            RNS.log(f"DIAGNOSTIC: Interface attributes - IN={self.IN}, OUT={self.OUT}, mode={getattr(self, 'mode', 'NOT_SET')}, online={self.online}", RNS.LOG_DEBUG)
-            RNS.log(f"DIAGNOSTIC: Packet first bytes (hex): {data[:10].hex()}", RNS.LOG_DEBUG)
-
             # Pass to Reticulum transport
             self.parent_interface.owner.inbound(data, self)
-
-            RNS.log(f"DIAGNOSTIC: owner.inbound() returned for {self}", RNS.LOG_DEBUG)
 
     def process_outgoing(self, data):
         """
@@ -1938,13 +1826,15 @@ class BLEPeerInterface(Interface):
         # Log packet transmission
         RNS.log(f"{self} TX: {len(data)} bytes to {self.peer_name}", RNS.LOG_DEBUG)
 
-        # Get fragmenter for this peer
+        # Get fragmenter for this peer (using identity-based key for MAC rotation immunity)
+        frag_key = self.parent_interface._get_fragmenter_key(self.peer_identity, self.peer_address)
+
         with self.parent_interface.frag_lock:
-            if self.peer_address not in self.parent_interface.fragmenters:
-                RNS.log(f"No fragmenter for peer {self.peer_address}", RNS.LOG_WARNING)
+            if frag_key not in self.parent_interface.fragmenters:
+                RNS.log(f"No fragmenter for peer {self.peer_name} (key: {frag_key})", RNS.LOG_WARNING)
                 return
 
-            fragmenter = self.parent_interface.fragmenters[self.peer_address]
+            fragmenter = self.parent_interface.fragmenters[frag_key]
 
         # Fragment the data
         try:
@@ -1957,110 +1847,16 @@ class BLEPeerInterface(Interface):
             RNS.log(f"Failed to fragment data for {self.peer_name}: {e}", RNS.LOG_ERROR)
             return
 
-        # Route based on connection type
-        if self.is_peripheral_connection:
-            # This peer is connected as a central to our GATT server
-            # Send via server notifications
-            self._send_via_peripheral(fragments)
-        else:
-            # This peer is connected via central mode
-            # Send via GATT characteristic write
-            self._send_via_central(fragments)
-
-    def _send_via_peripheral(self, fragments):
-        """
-        Send fragments via GATT server notifications.
-
-        Args:
-            fragments: List of fragment bytes to send
-        """
-        if not self.parent_interface.gatt_server:
-            RNS.log(f"No GATT server available for {self.peer_name}", RNS.LOG_ERROR)
-            return
-
+        # Send fragments via driver (driver handles role-aware routing)
         for i, fragment in enumerate(fragments):
             try:
-                # Schedule the async notification in the parent's event loop
-                future = asyncio.run_coroutine_threadsafe(
-                    self.parent_interface.gatt_server.send_notification(fragment, self.peer_address),
-                    self.parent_interface.loop
-                )
-
-                # Wait for completion (with timeout)
-                future.result(timeout=2.0)
+                self.parent_interface.driver.send(self.peer_address, fragment)
 
                 self.txb += len(fragment)
                 self.parent_interface.txb += len(fragment)
 
             except Exception as e:
-                RNS.log(f"Failed to send notification {i+1}/{len(fragments)} to {self.peer_name}: {e}", RNS.LOG_ERROR)
-                return
-
-    def _send_via_central(self, fragments):
-        """
-        Send fragments via GATT characteristic write (central mode).
-
-        Args:
-            fragments: List of fragment bytes to send
-        """
-        # Get BLE client for this peer (minimize lock hold time to avoid deadlock)
-        # FIX: Don't hold peer_lock during blocking I/O operations
-        client = None
-        with self.parent_interface.peer_lock:
-            if self.peer_address not in self.parent_interface.peers:
-                RNS.log(f"{self} peer {self.peer_name} ({self.peer_address}) no longer connected", RNS.LOG_WARNING)
-                return
-
-            # Get reference to client and release lock immediately
-            # Note: MTU is stored in peers tuple but already used during fragmenter creation
-            client, _, _ = self.parent_interface.peers[self.peer_address]
-
-        # Check if client is still connected before sending
-        if not client.is_connected:
-            RNS.log(f"{self} peer {self.peer_name} ({self.peer_address}) disconnected before transmission", RNS.LOG_WARNING)
-            return
-
-        # Send each fragment via BLE characteristic write
-        for i, fragment in enumerate(fragments):
-            try:
-                # Schedule the async write in the parent's event loop
-                future = asyncio.run_coroutine_threadsafe(
-                    client.write_gatt_char(BLEInterface.CHARACTERISTIC_RX_UUID, fragment),
-                    self.parent_interface.loop
-                )
-
-                # Wait for completion (with timeout)
-                future.result(timeout=2.0)
-
-                self.txb += len(fragment)
-                self.parent_interface.txb += len(fragment)
-
-            except asyncio.TimeoutError:
-                RNS.log(f"{self} timeout sending fragment {i+1}/{len(fragments)} to {self.peer_name}, "
-                        f"packet lost (Reticulum will retransmit)", RNS.LOG_WARNING)
-                return
-
-            # HIGH #3: Comprehensive asyncio exception handling
-            except (asyncio.CancelledError, RuntimeError) as e:
-                RNS.log(f"{self} event loop error sending fragment {i+1}/{len(fragments)}: "
-                        f"{type(e).__name__}: {e}", RNS.LOG_ERROR)
-                # Mark interface as offline if event loop died
-                if isinstance(e, RuntimeError) and "closed" in str(e).lower():
-                    RNS.log(f"{self} event loop is closed, marking interface offline", RNS.LOG_ERROR)
-                    self.parent_interface.online = False
-                return
-
-            except ConnectionError as e:
-                RNS.log(f"{self} connection lost to {self.peer_name} while sending fragment {i+1}/{len(fragments)}: "
-                        f"{type(e).__name__}: {e}, packet lost", RNS.LOG_WARNING)
-                return
-
-            except Exception as e:
-                error_type = type(e).__name__
-                RNS.log(f"{self} unexpected exception sending fragment {i+1}/{len(fragments)} to {self.peer_name}: "
-                        f"{error_type}: {e}, packet lost (Reticulum will retransmit)", RNS.LOG_WARNING)
-                # If one fragment fails, the whole packet is lost
-                # Reticulum's upper layers will handle retransmission
+                RNS.log(f"Failed to send fragment {i+1}/{len(fragments)} to {self.peer_name}: {e}", RNS.LOG_ERROR)
                 return
 
     def detach(self):
@@ -2080,10 +1876,18 @@ class BLEPeerInterface(Interface):
     @property
     def connection_id(self):
         """Get the unique connection ID for this peer interface"""
-        return f"{self.peer_address}-{self.connection_type}"
+        # For unified interfaces, use identity hash if available, otherwise address
+        if self.peer_identity:
+            try:
+                import RNS
+                identity_hash = RNS.Identity.full_hash(self.peer_identity)[:16].hex()[:8]
+                return f"{identity_hash}"
+            except:
+                pass
+        return f"{self.peer_address}"
 
     def __str__(self):
-        return f"BLEPeerInterface[{self.peer_name}/{self.connection_type}]"
+        return f"BLEPeerInterface[{self.peer_name}]"
 
 
 # Register interface for Reticulum
