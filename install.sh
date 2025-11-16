@@ -761,7 +761,13 @@ echo
 # Step 5C: BlueZ LE-Only Mode Configuration
 print_header "BlueZ LE-Only Mode Configuration"
 
-if ! command -v bluetoothctl &> /dev/null; then
+# Skip BlueZ configuration in container environments (no hardware access)
+if is_container; then
+    print_info "Container environment detected - skipping BlueZ LE-only mode configuration"
+    print_warning "BlueZ configuration is not applicable in containers"
+    print_info "This is expected behavior for CI/testing environments"
+    echo
+elif ! command -v bluetoothctl &> /dev/null; then
     print_warning "bluetoothctl not found - skipping LE-only mode configuration"
     echo
 elif [ ! -f /etc/bluetooth/main.conf ]; then
