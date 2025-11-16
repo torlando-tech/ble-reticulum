@@ -140,7 +140,11 @@ jobs:
     - name: Run integration tests
       run: |
         # Run integration tests (no hardware required)
+        # Exclude v2.2 protocol tests that require full RNS environment
         python -m pytest tests/ -v -m "not hardware" \
+          --ignore=tests/test_v2_2_identity_handshake.py \
+          --ignore=tests/test_v2_2_mac_sorting.py \
+          --ignore=tests/test_v2_2_race_conditions.py \
           --cov=src/RNS/Interfaces \
           --cov-report=term-missing \
           --cov-report=xml:coverage-integration.xml \
