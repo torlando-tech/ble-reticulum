@@ -89,8 +89,8 @@ class TestStaleConnectionPolling:
         start_time = time.time()
         thread.start()
 
-        # Let it run for ~2 checks
-        time.sleep(0.15)
+        # Let it run for ~2 checks (need >1.2s for 2 complete cycles at 0.6s each)
+        time.sleep(1.5)
         stop_event.set()
         thread.join(timeout=1.0)
 
