@@ -35,6 +35,19 @@ print_info() {
     echo -e "${BLUE}ℹ${NC} $1"
 }
 
+# Helper function: Detect if running in a container environment
+is_container() {
+    # Check for Docker container
+    if [ -f /.dockerenv ]; then
+        return 0
+    fi
+    # Check cgroup for container indicators
+    if grep -q -E 'docker|lxc|containerd|kubepods' /proc/1/cgroup 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
 # Helper function: pip install with compatibility across all OS versions
 pip_install() {
     local packages="$*"
@@ -680,7 +693,13 @@ fi
 # Step 5B: Bluetooth Adapter Power State
 print_header "Bluetooth Adapter Power State"
 
-if command -v bluetoothctl &> /dev/null; then
+# Skip Bluetooth checks in container environments (no hardware access)
+if is_container; then
+    print_info "Container environment detected - skipping Bluetooth adapter checks"
+    print_warning "Bluetooth hardware is not available in containers"
+    print_info "This is expected behavior for CI/testing environments"
+    echo
+elif command -v bluetoothctl &> /dev/null; then
     print_info "Checking Bluetooth adapter power state..."
 
     # Check for rfkill blocks first (must be unblocked before power-on works)
