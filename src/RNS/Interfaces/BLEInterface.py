@@ -284,6 +284,26 @@ class BLEInterface(Interface):
 
         super().__init__()
 
+        # CRITICAL: Set HW_MTU as instance attribute after super().__init__()
+        #
+        # Bug explanation:
+        # - Base Interface.__init__() sets self.HW_MTU = None
+        # - BLEInterface.HW_MTU = 500 is a CLASS attribute, not instance
+        # - After super().__init__(), self.HW_MTU is None (instance shadows class)
+        # - BLEPeerInterface copies: self.HW_MTU = parent.HW_MTU (gets None)
+        #
+        # Impact when HW_MTU is None:
+        # - Transport.py line ~1855 checks: if packet.receiving_interface.HW_MTU == None
+        # - If true, it TRUNCATES packet.data by 3 bytes (LINK_MTU_SIZE) before
+        #   passing to Link.validate_request()
+        # - Link.link_id_from_lr_packet() uses len(packet.data) to compute truncation
+        # - Since packet.data was pre-truncated, it computes WRONG link_id
+        # - Link proof's destination_hash won't match pending link's link_id
+        # - Result: Links time out despite proof arriving correctly
+        #
+        # This bug ONLY affects BLE because other interfaces set HW_MTU in __init__
+        self.HW_MTU = BLEInterface.HW_MTU
+
         # Parse configuration
         c = Interface.get_config_obj(configuration)
 
@@ -364,6 +384,7 @@ class BLEInterface(Interface):
         self.fragmenters = {}  # address -> BLEFragmenter (per MTU)
         self.reassemblers = {}  # address -> BLEReassembler
         self.frag_lock = threading.Lock()
+        self.pending_mtu = {}  # address -> mtu (for MTU/identity race condition)
 
         # Discovery state with prioritization
 
@@ -751,7 +772,7 @@ class BLEInterface(Interface):
         role = self.driver.get_peer_role(address)
 
         if peer_identity is not None:
-            # Central mode: identity provided by driver
+            # Identity provided by driver (central mode direct, peripheral mode via late callback)
             if len(peer_identity) == 16:
                 identity_hash = self._compute_identity_hash(peer_identity)
 
@@ -759,8 +780,15 @@ class BLEInterface(Interface):
                 self.address_to_identity[address] = peer_identity
                 self.identity_to_address[identity_hash] = address
 
-                RNS.log(f"{self} connected to {address} as CENTRAL, received identity: {identity_hash}", RNS.LOG_INFO)
+                role_str = role.upper() if role else "UNKNOWN"
+                RNS.log(f"{self} connected to {address} as {role_str}, received identity: {identity_hash}", RNS.LOG_INFO)
                 self._record_connection_success(address)
+
+                # Check for pending MTU (race condition: MTU negotiated before identity)
+                if address in self.pending_mtu:
+                    pending_mtu = self.pending_mtu.pop(address)
+                    RNS.log(f"{self} creating deferred fragmenter for {address} (MTU={pending_mtu})", RNS.LOG_DEBUG)
+                    self._mtu_negotiated_callback(address, pending_mtu)
             else:
                 RNS.log(f"{self} invalid identity from {address} (wrong length), disconnecting", RNS.LOG_WARNING)
                 self.driver.disconnect(address)
@@ -819,7 +847,10 @@ class BLEInterface(Interface):
         # Get peer identity
         peer_identity = self.address_to_identity.get(address)
         if not peer_identity:
-            RNS.log(f"{self} no identity for {address}, cannot create fragmenter", RNS.LOG_WARNING)
+            # Race condition: MTU negotiated before identity received
+            # Store pending MTU and create fragmenter when identity arrives
+            RNS.log(f"{self} no identity for {address}, storing pending MTU {mtu}", RNS.LOG_DEBUG)
+            self.pending_mtu[address] = mtu
             return
 
         # Create or update fragmenter
@@ -979,6 +1010,50 @@ class BLEInterface(Interface):
                     del self.fragmenters[frag_key]
                 if frag_key in self.reassemblers:
                     del self.reassemblers[frag_key]
+
+        # Clean up pending MTU (from MTU/identity race condition)
+        if address in self.pending_mtu:
+            del self.pending_mtu[address]
+
+    def _cleanup_stale_interface(self, identity_hash: str, old_address: str):
+        """
+        Clean up stale interface after MAC rotation.
+
+        Called when we detect the same identity at a new MAC address but the
+        old connection is no longer alive. This allows reconnection to the
+        peer at their new MAC address.
+
+        Args:
+            identity_hash: 16-character hex hash of the peer's identity
+            old_address: The old MAC address that is no longer valid
+        """
+        # Get peer identity for fragmenter cleanup
+        peer_identity = self.address_to_identity.get(old_address)
+
+        # Detach and remove old interface
+        if identity_hash in self.spawned_interfaces:
+            old_interface = self.spawned_interfaces.pop(identity_hash)
+            old_interface.detach()
+            RNS.log(f"{self} detached stale interface for {identity_hash[:8]}", RNS.LOG_DEBUG)
+
+        # Clean up address mappings
+        if identity_hash in self.identity_to_address:
+            del self.identity_to_address[identity_hash]
+
+        # Clean up fragmenter/reassembler for old address
+        if peer_identity:
+            frag_key = self._get_fragmenter_key(peer_identity, old_address)
+            with self.frag_lock:
+                if frag_key in self.fragmenters:
+                    del self.fragmenters[frag_key]
+                if frag_key in self.reassemblers:
+                    del self.reassemblers[frag_key]
+
+        # Clean up pending MTU for old address
+        if old_address in self.pending_mtu:
+            del self.pending_mtu[old_address]
+
+        RNS.log(f"{self} cleaned up stale state for {old_address}", RNS.LOG_DEBUG)
 
     def _error_callback(self, severity: str, message: str, exc: Exception = None):
         """
@@ -1186,15 +1261,33 @@ class BLEInterface(Interface):
                         RNS.LOG_DEBUG)
                 continue
 
-            # Protocol v2.2: Skip if interface exists for this identity (any connection type)
-            # This prevents dual connections (central + peripheral to same peer)
+            # Protocol v2.2: Skip if interface exists AND is still alive
+            # This prevents dual connections but allows MAC rotation recovery
             peer_identity = self.address_to_identity.get(address)
             if peer_identity:
                 identity_hash = self._compute_identity_hash(peer_identity)
                 if identity_hash in self.spawned_interfaces:
-                    RNS.log(f"{self} [v2.2] skipping {peer.name} - interface exists for identity {identity_hash[:8]}",
-                            RNS.LOG_DEBUG)
-                    continue
+                    # Check if existing interface is still connected
+                    existing_address = self.identity_to_address.get(identity_hash)
+                    if existing_address and existing_address != address:
+                        # Same identity at different MAC = MAC rotation
+                        # Check if old connection is still alive
+                        if existing_address in self.peers:
+                            # Old connection still active - skip (correct behavior)
+                            RNS.log(f"{self} [v2.2] skipping {peer.name} - already connected via {existing_address[-8:]}",
+                                    RNS.LOG_DEBUG)
+                            continue
+                        else:
+                            # Old connection dead - clean up and allow new connection
+                            RNS.log(f"{self} [v2.2] MAC rotation: {identity_hash[:8]} moved from {existing_address[-8:]} to {address[-8:]}, cleaning up stale interface",
+                                    RNS.LOG_INFO)
+                            self._cleanup_stale_interface(identity_hash, existing_address)
+                            # Fall through to connect to new MAC
+                    elif existing_address == address:
+                        # Same address, interface exists - skip
+                        RNS.log(f"{self} [v2.2] skipping {peer.name} - interface exists for identity {identity_hash[:8]}",
+                                RNS.LOG_DEBUG)
+                        continue
 
             # Protocol v2.2: MAC address sorting - deterministic connection direction
             # Lower MAC initiates (central), higher MAC only accepts (peripheral)
