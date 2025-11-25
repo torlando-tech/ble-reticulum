@@ -1015,6 +1015,46 @@ class BLEInterface(Interface):
         if address in self.pending_mtu:
             del self.pending_mtu[address]
 
+    def _cleanup_stale_interface(self, identity_hash: str, old_address: str):
+        """
+        Clean up stale interface after MAC rotation.
+
+        Called when we detect the same identity at a new MAC address but the
+        old connection is no longer alive. This allows reconnection to the
+        peer at their new MAC address.
+
+        Args:
+            identity_hash: 16-character hex hash of the peer's identity
+            old_address: The old MAC address that is no longer valid
+        """
+        # Get peer identity for fragmenter cleanup
+        peer_identity = self.address_to_identity.get(old_address)
+
+        # Detach and remove old interface
+        if identity_hash in self.spawned_interfaces:
+            old_interface = self.spawned_interfaces.pop(identity_hash)
+            old_interface.detach()
+            RNS.log(f"{self} detached stale interface for {identity_hash[:8]}", RNS.LOG_DEBUG)
+
+        # Clean up address mappings
+        if identity_hash in self.identity_to_address:
+            del self.identity_to_address[identity_hash]
+
+        # Clean up fragmenter/reassembler for old address
+        if peer_identity:
+            frag_key = self._get_fragmenter_key(peer_identity, old_address)
+            with self.frag_lock:
+                if frag_key in self.fragmenters:
+                    del self.fragmenters[frag_key]
+                if frag_key in self.reassemblers:
+                    del self.reassemblers[frag_key]
+
+        # Clean up pending MTU for old address
+        if old_address in self.pending_mtu:
+            del self.pending_mtu[old_address]
+
+        RNS.log(f"{self} cleaned up stale state for {old_address}", RNS.LOG_DEBUG)
+
     def _error_callback(self, severity: str, message: str, exc: Exception = None):
         """
         Driver callback: Handle driver errors.
@@ -1221,15 +1261,33 @@ class BLEInterface(Interface):
                         RNS.LOG_DEBUG)
                 continue
 
-            # Protocol v2.2: Skip if interface exists for this identity (any connection type)
-            # This prevents dual connections (central + peripheral to same peer)
+            # Protocol v2.2: Skip if interface exists AND is still alive
+            # This prevents dual connections but allows MAC rotation recovery
             peer_identity = self.address_to_identity.get(address)
             if peer_identity:
                 identity_hash = self._compute_identity_hash(peer_identity)
                 if identity_hash in self.spawned_interfaces:
-                    RNS.log(f"{self} [v2.2] skipping {peer.name} - interface exists for identity {identity_hash[:8]}",
-                            RNS.LOG_DEBUG)
-                    continue
+                    # Check if existing interface is still connected
+                    existing_address = self.identity_to_address.get(identity_hash)
+                    if existing_address and existing_address != address:
+                        # Same identity at different MAC = MAC rotation
+                        # Check if old connection is still alive
+                        if existing_address in self.peers:
+                            # Old connection still active - skip (correct behavior)
+                            RNS.log(f"{self} [v2.2] skipping {peer.name} - already connected via {existing_address[-8:]}",
+                                    RNS.LOG_DEBUG)
+                            continue
+                        else:
+                            # Old connection dead - clean up and allow new connection
+                            RNS.log(f"{self} [v2.2] MAC rotation: {identity_hash[:8]} moved from {existing_address[-8:]} to {address[-8:]}, cleaning up stale interface",
+                                    RNS.LOG_INFO)
+                            self._cleanup_stale_interface(identity_hash, existing_address)
+                            # Fall through to connect to new MAC
+                    elif existing_address == address:
+                        # Same address, interface exists - skip
+                        RNS.log(f"{self} [v2.2] skipping {peer.name} - interface exists for identity {identity_hash[:8]}",
+                                RNS.LOG_DEBUG)
+                        continue
 
             # Protocol v2.2: MAC address sorting - deterministic connection direction
             # Lower MAC initiates (central), higher MAC only accepts (peripheral)
