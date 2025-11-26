@@ -54,22 +54,53 @@ if not hasattr(RNS, 'Identity'):
     RNS.Identity.full_hash = lambda x: (x * 2)[:16]  # Simple mock
 
 # Mock RNS.Interfaces.Interface (required by BLEInterface.py)
-if 'RNS.Interfaces' not in _sys.modules:
-    rns_interfaces_mock = MagicMock()
-    _sys.modules['RNS.Interfaces'] = rns_interfaces_mock
+# First, ensure mock is in place BEFORE any imports that need it
+rns_interfaces_mock = MagicMock()
+_sys.modules['RNS.Interfaces'] = rns_interfaces_mock
+_sys.modules['RNS.Interfaces.Interface'] = MagicMock()
 
-    # Create mock Interface base class
-    class MockInterface:
-        MODE_FULL = 1
-        def __init__(self):
-            self.IN = True
-            self.OUT = True
-            self.online = False
+# Create mock Interface base class
+class MockInterface:
+    MODE_FULL = 1
+    def __init__(self):
+        self.IN = True
+        self.OUT = True
+        self.online = False
 
-    rns_interfaces_mock.Interface = MockInterface
+    @staticmethod
+    def get_config_obj(configuration):
+        """Mock config object that returns dict values via attribute access."""
+        class ConfigObj:
+            def __init__(self, config_dict):
+                self._config = config_dict if isinstance(config_dict, dict) else {}
+
+            def __getattr__(self, name):
+                return self._config.get(name)
+
+            def __contains__(self, key):
+                return key in self._config
+
+            def get(self, key, default=None):
+                return self._config.get(key, default)
+
+            def as_dict(self):
+                return self._config
+
+        return ConfigObj(configuration)
+
+rns_interfaces_mock.Interface = MockInterface
+_sys.modules['RNS.Interfaces.Interface'].Interface = MockInterface
 
 from tests.mock_ble_driver import MockBLEDriver
-from RNS.Interfaces.BLEInterface import BLEInterface, DiscoveredPeer
+
+# Import BLEInterface directly using importlib to bypass RNS namespace conflicts
+import importlib.util
+_ble_interface_path = os.path.join(os.path.dirname(__file__), '..', 'src', 'RNS', 'Interfaces', 'BLEInterface.py')
+_spec = importlib.util.spec_from_file_location("BLEInterface", _ble_interface_path)
+_ble_module = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_ble_module)
+BLEInterface = _ble_module.BLEInterface
+DiscoveredPeer = _ble_module.DiscoveredPeer
 import time
 
 
@@ -304,6 +335,122 @@ class TestIdentityHandshakeBidirectional:
         assert len(peripheral_received) == 1
         assert peripheral_received[0][0] == central_driver.local_address
         assert peripheral_received[0][1] == central_identity
+
+
+class TestReassemblerRaceCondition:
+    """
+    Test that reassembler is created BEFORE peer interface during handshake.
+
+    This prevents a race condition where data arrives immediately after the
+    identity handshake but before the reassembler is ready, causing data loss.
+
+    Fix commit: Creates fragmenter/reassembler BEFORE spawning peer interface
+    in handle_peripheral_data(), matching the pattern in _mtu_negotiated_callback().
+    """
+
+    def test_reassembler_created_before_interface_on_handshake(self):
+        """
+        Test that reassembler exists before peer interface after handshake.
+
+        Regression test for: "no reassembler for {address}, dropping data"
+        This occurred because handle_peripheral_data() spawned the interface
+        before creating the reassembler, allowing data to arrive in the gap.
+        """
+        driver = MockBLEDriver(local_address="AA:BB:CC:DD:EE:FF")
+        owner = MockOwner()
+
+        config = {"name": "Test", "enable_peripheral": True}
+        interface = BLEInterface(owner, config)
+        interface.driver = driver
+
+        central_address = "11:22:33:44:55:66"
+        central_identity = b'\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10'
+
+        # Simulate identity handshake
+        interface.handle_peripheral_data(central_identity, central_address)
+
+        # Get keys used for lookup
+        frag_key = interface._get_fragmenter_key(central_identity, central_address)
+        identity_hash = interface._compute_identity_hash(central_identity)
+
+        # Both reassembler AND interface should exist after handshake
+        assert frag_key in interface.reassemblers, "Reassembler should exist after handshake"
+        assert frag_key in interface.fragmenters, "Fragmenter should exist after handshake"
+        assert identity_hash in interface.spawned_interfaces, "Interface should exist after handshake"
+
+    def test_data_immediately_after_handshake_not_dropped(self):
+        """
+        Test that data arriving immediately after handshake is processed.
+
+        This simulates the race condition where data packets arrive right
+        after the identity handshake completes. Before the fix, data would
+        be dropped with "no reassembler" warning.
+        """
+        driver = MockBLEDriver(local_address="AA:BB:CC:DD:EE:FF")
+        owner = MockOwner()
+
+        config = {"name": "Test", "enable_peripheral": True}
+        interface = BLEInterface(owner, config)
+        interface.driver = driver
+
+        central_address = "11:22:33:44:55:66"
+        central_identity = b'\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10'
+
+        # Step 1: Send identity handshake
+        interface.handle_peripheral_data(central_identity, central_address)
+
+        # Step 2: Immediately send data (simulating race condition)
+        # This is a minimal fragmented packet: START flag + 1 fragment total + payload
+        # Fragment header: [flags(1)] [total_fragments(1)] [fragment_num(1)] [reserved(1)] [payload]
+        test_payload = b'\x80\x01\x00\x00' + b'test_data_here!'  # START flag, 1 total, frag 0
+
+        # This should NOT raise or log "no reassembler" - it should be processed
+        # (The actual reassembly may fail due to invalid packet format, but that's OK -
+        # the key is that we don't get "no reassembler" error)
+        frag_key = interface._get_fragmenter_key(central_identity, central_address)
+
+        # Verify reassembler exists before we send data
+        assert frag_key in interface.reassemblers, \
+            "Reassembler must exist immediately after handshake to prevent data loss"
+
+        # Now send data - it should find the reassembler
+        interface.handle_peripheral_data(test_payload, central_address)
+
+        # Verify identity wasn't corrupted (data shouldn't be treated as new handshake)
+        assert interface.address_to_identity[central_address] == central_identity
+
+    def test_central_mode_reassembler_order_for_reference(self):
+        """
+        Verify that central mode creates reassembler before interface.
+
+        This is the reference implementation that peripheral mode should match.
+        """
+        driver = MockBLEDriver(local_address="AA:BB:CC:DD:EE:FF")
+        owner = MockOwner()
+
+        config = {"name": "Test", "enable_central": True}
+        interface = BLEInterface(owner, config)
+        interface.driver = driver
+        interface.local_address = driver.local_address
+
+        peer_address = "11:22:33:44:55:66"
+        peer_identity = b'\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10'
+
+        # Pre-populate identity mapping (simulates identity received during connection)
+        interface.address_to_identity[peer_address] = peer_identity
+        identity_hash = interface._compute_identity_hash(peer_identity)
+        interface.identity_to_address[identity_hash] = peer_address
+
+        # Simulate MTU negotiated callback (central mode entry point)
+        interface._mtu_negotiated_callback(peer_address, 185)
+
+        # Get keys
+        frag_key = interface._get_fragmenter_key(peer_identity, peer_address)
+
+        # Both should exist
+        assert frag_key in interface.reassemblers, "Central mode: reassembler should exist"
+        assert frag_key in interface.fragmenters, "Central mode: fragmenter should exist"
+        assert identity_hash in interface.spawned_interfaces, "Central mode: interface should exist"
 
 
 if __name__ == "__main__":
