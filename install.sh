@@ -753,12 +753,10 @@ else
     print_info "This prevents 'br-connection-profile-unavailable' errors on dual-mode hardware"
     echo
 
-    # Track if we need to restart bluetooth at the end
-    BLUEZ_CONFIG_CHANGED=false
-
     # Check if ControllerMode is already set to 'le'
     if grep -q "^[[:space:]]*ControllerMode[[:space:]]*=[[:space:]]*le" /etc/bluetooth/main.conf 2>/dev/null; then
         print_success "ControllerMode already set to 'le' in /etc/bluetooth/main.conf"
+        echo
     else
         print_info "Adding ControllerMode = le to /etc/bluetooth/main.conf..."
 
@@ -794,127 +792,23 @@ else
             echo "ControllerMode = le" | sudo tee -a /etc/bluetooth/main.conf > /dev/null
             print_success "Added [General] section with ControllerMode = le"
         fi
-        BLUEZ_CONFIG_CHANGED=true
-    fi
 
-    # Configure JustWorksRepairing = always for automatic Just Works pairing
-    if grep -q "^[[:space:]]*JustWorksRepairing[[:space:]]*=[[:space:]]*always" /etc/bluetooth/main.conf 2>/dev/null; then
-        print_success "JustWorksRepairing already set to 'always'"
-    else
-        print_info "Enabling JustWorksRepairing = always for automatic pairing..."
-        if grep -q "^[[:space:]]*#[[:space:]]*JustWorksRepairing" /etc/bluetooth/main.conf 2>/dev/null; then
-            # Commented out - add after the comment
-            if [ "$EUID" -eq 0 ]; then
-                sed -i '/^[[:space:]]*#[[:space:]]*JustWorksRepairing/a JustWorksRepairing = always' /etc/bluetooth/main.conf
-            else
-                sudo sed -i '/^[[:space:]]*#[[:space:]]*JustWorksRepairing/a JustWorksRepairing = always' /etc/bluetooth/main.conf
-            fi
-        elif grep -q "^[[:space:]]*JustWorksRepairing[[:space:]]*=" /etc/bluetooth/main.conf 2>/dev/null; then
-            # Exists but different value - update
-            if [ "$EUID" -eq 0 ]; then
-                sed -i 's/^[[:space:]]*JustWorksRepairing[[:space:]]*=.*/JustWorksRepairing = always/' /etc/bluetooth/main.conf
-            else
-                sudo sed -i 's/^[[:space:]]*JustWorksRepairing[[:space:]]*=.*/JustWorksRepairing = always/' /etc/bluetooth/main.conf
-            fi
-        elif grep -q "^\[General\]" /etc/bluetooth/main.conf 2>/dev/null; then
-            # Add after [General]
-            if [ "$EUID" -eq 0 ]; then
-                sed -i '/^\[General\]/a JustWorksRepairing = always' /etc/bluetooth/main.conf
-            else
-                sudo sed -i '/^\[General\]/a JustWorksRepairing = always' /etc/bluetooth/main.conf
-            fi
-        fi
-        print_success "JustWorksRepairing = always configured"
-        BLUEZ_CONFIG_CHANGED=true
-    fi
-
-    # Restart BlueZ if config changed
-    if [ "$BLUEZ_CONFIG_CHANGED" = true ]; then
         echo
         print_info "Restarting BlueZ service to apply changes..."
         if sudo systemctl restart bluetooth 2>/dev/null || sudo service bluetooth restart 2>/dev/null; then
             print_success "BlueZ service restarted successfully"
             sleep 2  # Give BlueZ time to reinitialize
 
-            # Verify settings
+            # Verify the setting was applied
             if grep -q "^[[:space:]]*ControllerMode[[:space:]]*=[[:space:]]*le" /etc/bluetooth/main.conf 2>/dev/null; then
-                print_success "ControllerMode = le verified"
-            fi
-            if grep -q "^[[:space:]]*JustWorksRepairing[[:space:]]*=[[:space:]]*always" /etc/bluetooth/main.conf 2>/dev/null; then
-                print_success "JustWorksRepairing = always verified"
+                print_success "ControllerMode = le configuration verified"
+            else
+                print_warning "Could not verify ControllerMode setting - check manually"
             fi
         else
             print_error "Failed to restart BlueZ service"
             print_info "You may need to restart manually: sudo systemctl restart bluetooth"
         fi
-    fi
-    echo
-fi
-
-echo
-
-# Step 5D: GATT Cache Configuration (prevents pairing prompts on newer Android devices)
-print_header "GATT Cache Configuration"
-
-if [ ! -f /etc/bluetooth/main.conf ]; then
-    print_warning "/etc/bluetooth/main.conf not found - skipping GATT cache configuration"
-    echo
-else
-    print_info "Configuring BlueZ GATT cache to prevent pairing prompts"
-    print_info "This fixes pairing prompts on Android 15+ / Bluetooth 5.3+ devices"
-    echo
-
-    # Check if Cache is already set to 'no' under [GATT] section
-    if grep -q "^[[:space:]]*Cache[[:space:]]*=[[:space:]]*no" /etc/bluetooth/main.conf 2>/dev/null; then
-        print_success "GATT Cache already set to 'no' in /etc/bluetooth/main.conf"
-        echo
-    else
-        print_info "Adding Cache = no to [GATT] section in /etc/bluetooth/main.conf..."
-
-        # Check if [GATT] section exists
-        if grep -q "^\[GATT\]" /etc/bluetooth/main.conf 2>/dev/null; then
-            # [GATT] section exists
-            if grep -q "^[[:space:]]*#[[:space:]]*Cache[[:space:]]*=" /etc/bluetooth/main.conf 2>/dev/null; then
-                # Commented out - add Cache = no after the commented line
-                if [ "$EUID" -eq 0 ]; then
-                    sed -i '/^[[:space:]]*#[[:space:]]*Cache[[:space:]]*=/a Cache = no' /etc/bluetooth/main.conf
-                else
-                    sudo sed -i '/^[[:space:]]*#[[:space:]]*Cache[[:space:]]*=/a Cache = no' /etc/bluetooth/main.conf
-                fi
-                print_success "Added Cache = no (keeping commented default as reference)"
-            elif grep -q "^[[:space:]]*Cache[[:space:]]*=" /etc/bluetooth/main.conf 2>/dev/null; then
-                # Already exists but set to different value - update it
-                if [ "$EUID" -eq 0 ]; then
-                    sed -i 's/^[[:space:]]*Cache[[:space:]]*=.*/Cache = no/' /etc/bluetooth/main.conf
-                else
-                    sudo sed -i 's/^[[:space:]]*Cache[[:space:]]*=.*/Cache = no/' /etc/bluetooth/main.conf
-                fi
-                print_success "Updated existing Cache setting to 'no'"
-            else
-                # Doesn't exist - add it after [GATT]
-                if [ "$EUID" -eq 0 ]; then
-                    sed -i '/^\[GATT\]/a Cache = no' /etc/bluetooth/main.conf
-                else
-                    sudo sed -i '/^\[GATT\]/a Cache = no' /etc/bluetooth/main.conf
-                fi
-                print_success "Added Cache = no under [GATT] section"
-            fi
-        else
-            # No [GATT] section - add it at end of file
-            if [ "$EUID" -eq 0 ]; then
-                echo "" >> /etc/bluetooth/main.conf
-                echo "[GATT]" >> /etc/bluetooth/main.conf
-                echo "Cache = no" >> /etc/bluetooth/main.conf
-            else
-                echo "" | sudo tee -a /etc/bluetooth/main.conf > /dev/null
-                echo "[GATT]" | sudo tee -a /etc/bluetooth/main.conf > /dev/null
-                echo "Cache = no" | sudo tee -a /etc/bluetooth/main.conf > /dev/null
-            fi
-            print_success "Added [GATT] section with Cache = no"
-        fi
-
-        # Note: Service restart will happen in the next step or has already happened
-        print_info "GATT caching disabled - this prevents Service Changed subscription pairing"
         echo
     fi
 fi
