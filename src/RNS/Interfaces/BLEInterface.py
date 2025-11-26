@@ -1525,17 +1525,8 @@ class BLEInterface(Interface):
                 RNS.log(f"{self} received identity handshake from central {sender_address}: {central_identity_hash}", RNS.LOG_INFO)
                 RNS.log(f"{self} stored identity mapping for {sender_address}", RNS.LOG_DEBUG)
 
-                # Create peer interface and fragmenter/reassembler now that we have identity
-                self._spawn_peer_interface(
-                    address=sender_address,
-                    name=f"Central-{sender_address[-8:]}",
-                    peer_identity=central_identity,
-                    client=None,  # No client for peripheral connections
-                    mtu=None,  # MTU managed by GATT server
-                    connection_type="peripheral"
-                )
-
-                # Create fragmenter/reassembler for this peer
+                # Create fragmenter/reassembler FIRST (before interface) to prevent race condition
+                # where data arrives before reassembler exists
                 frag_key = self._get_fragmenter_key(central_identity, sender_address)
                 with self.frag_lock:
                     # Use default MTU for peripheral connections (GATT server manages MTU)
@@ -1544,6 +1535,16 @@ class BLEInterface(Interface):
                     self.fragmenters[frag_key] = BLEFragmenter(mtu=mtu)
                     self.reassemblers[frag_key] = BLEReassembler(timeout=self.connection_timeout)
                 RNS.log(f"{self} created fragmenter/reassembler for central (key: {frag_key[:16]})", RNS.LOG_DEBUG)
+
+                # Now create peer interface (after fragmenter/reassembler is ready)
+                self._spawn_peer_interface(
+                    address=sender_address,
+                    name=f"Central-{sender_address[-8:]}",
+                    peer_identity=central_identity,
+                    client=None,  # No client for peripheral connections
+                    mtu=None,  # MTU managed by GATT server
+                    connection_type="peripheral"
+                )
 
                 return  # Handshake processed, done
             except Exception as e:
