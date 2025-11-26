@@ -32,10 +32,23 @@ Usage:
 
 import sys
 import os
-# Add src directory to path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from RNS.Interfaces.bluetooth_driver import BLEDriverInterface, BLEDevice, DriverState
+# Add src directory to path for imports
+src_path = os.path.join(os.path.dirname(__file__), '..', 'src')
+if src_path not in sys.path:
+    sys.path.insert(0, src_path)
+
+# Import directly using importlib to bypass RNS namespace conflicts
+# This avoids issues when a real RNS package is installed globally
+import importlib.util
+bluetooth_driver_path = os.path.join(src_path, 'RNS', 'Interfaces', 'bluetooth_driver.py')
+spec = importlib.util.spec_from_file_location("bluetooth_driver", bluetooth_driver_path)
+bluetooth_driver = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(bluetooth_driver)
+
+BLEDriverInterface = bluetooth_driver.BLEDriverInterface
+BLEDevice = bluetooth_driver.BLEDevice
+DriverState = bluetooth_driver.DriverState
 from typing import List, Optional, Callable, Dict
 import time
 
