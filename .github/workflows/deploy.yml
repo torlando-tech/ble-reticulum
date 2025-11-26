@@ -99,9 +99,28 @@ jobs:
           Host *.local 10.0.0.* 192.168.*
               StrictHostKeyChecking no
               UserKnownHostsFile /dev/null
-              LogLevel ERROR
+              LogLevel INFO
+              IdentityFile ~/.ssh/id_ed25519
           EOF
           chmod 600 ~/.ssh/config
+
+      - name: Test SSH connectivity to ${{ matrix.pi.host }}
+        env:
+          PI_HOST: ${{ matrix.pi.host }}
+          PI_USER: ${{ secrets.PI_USER }}
+        run: |
+          echo "Testing SSH connection to $PI_HOST..."
+          if ssh -v -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i ~/.ssh/id_ed25519 "$PI_USER@$PI_HOST" 'echo "SSH connection successful"'; then
+            echo "✓ SSH connectivity verified"
+          else
+            echo "✗ SSH connection failed"
+            echo ""
+            echo "Troubleshooting:"
+            echo "  - Is the Pi online? ping $PI_HOST"
+            echo "  - Is SSH enabled on the Pi?"
+            echo "  - Is the SSH key authorized on the Pi?"
+            exit 1
+          fi
 
       - name: Deploy to ${{ matrix.pi.host }}
         env:
@@ -170,14 +189,21 @@ jobs:
           echo '  ✓ Deployment successful!'"
 
           # Execute deployment via SSH
-          if echo "$DEPLOY_SCRIPT" | ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$PI_USER@$PI_HOST" bash; then
+          SSH_OUTPUT=$(mktemp)
+          if echo "$DEPLOY_SCRIPT" | ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i ~/.ssh/id_ed25519 "$PI_USER@$PI_HOST" bash 2>&1 | tee "$SSH_OUTPUT"; then
             echo ""
             echo "✓ Successfully deployed to $PI_HOST"
           else
+            EXIT_CODE=$?
             echo ""
-            echo "✗ Failed to deploy to $PI_HOST"
+            echo "✗ Failed to deploy to $PI_HOST (exit code: $EXIT_CODE)"
+            echo ""
+            echo "Last 50 lines of output:"
+            tail -50 "$SSH_OUTPUT"
+            rm -f "$SSH_OUTPUT"
             exit 1
           fi
+          rm -f "$SSH_OUTPUT"
 
       - name: Cleanup SSH key
         if: always()
@@ -204,6 +230,15 @@ jobs:
           chmod 700 ~/.ssh
           echo "$PI_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
+
+          cat >> ~/.ssh/config <<EOF
+          Host *.local 10.0.0.* 192.168.*
+              StrictHostKeyChecking no
+              UserKnownHostsFile /dev/null
+              LogLevel INFO
+              IdentityFile ~/.ssh/id_ed25519
+          EOF
+          chmod 600 ~/.ssh/config
 
       - name: Validate BLE interface on ${{ matrix.pi.host }}
         env:
@@ -286,14 +321,21 @@ jobs:
           '
 
           # Execute validation via SSH
-          if echo "$VALIDATION_SCRIPT" | ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$PI_USER@$PI_HOST" bash; then
+          SSH_OUTPUT=$(mktemp)
+          if echo "$VALIDATION_SCRIPT" | ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i ~/.ssh/id_ed25519 "$PI_USER@$PI_HOST" bash 2>&1 | tee "$SSH_OUTPUT"; then
             echo ""
             echo "✓ $PI_HOST validation passed"
           else
+            EXIT_CODE=$?
             echo ""
-            echo "✗ $PI_HOST validation failed"
+            echo "✗ $PI_HOST validation failed (exit code: $EXIT_CODE)"
+            echo ""
+            echo "Last 50 lines of output:"
+            tail -50 "$SSH_OUTPUT"
+            rm -f "$SSH_OUTPUT"
             exit 1
           fi
+          rm -f "$SSH_OUTPUT"
 
       - name: Cleanup SSH key
         if: always()
