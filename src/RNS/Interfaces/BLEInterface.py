@@ -1282,7 +1282,11 @@ class BLEInterface(Interface):
                             RNS.log(f"{self} [v2.2] MAC rotation: {identity_hash[:8]} moved from {existing_address[-8:]} to {address[-8:]}, cleaning up stale interface",
                                     RNS.LOG_INFO)
                             self._cleanup_stale_interface(identity_hash, existing_address)
-                            # Fall through to connect to new MAC
+                            # Bypass MAC sorting - we must reconnect after MAC rotation
+                            # regardless of which device has the higher MAC address
+                            score = self._score_peer(peer)
+                            scored_peers.append((score, peer))
+                            continue  # Skip remaining checks, peer already added
                     elif existing_address == address:
                         # Same address, interface exists - skip
                         RNS.log(f"{self} [v2.2] skipping {peer.name} - interface exists for identity {identity_hash[:8]}",
