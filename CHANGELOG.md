@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2025-11-15
+
+### Added
+- pipx installation support with automated D-Bus dependency handling
+- BlueZ LE-only mode configuration in installer (prevents BR/EDR fallback)
+- Scanner watchdog to detect and recover from Bluetooth stack corruption
+- Service UUID filtering for more efficient peer discovery
+- Pre-built wheel support for Pi Zero W Python 3.13 (saves 20+ min install time)
+
 ### Fixed
 - **Connection race condition causing "Operation already in progress" errors**
   - Added `_connecting_peers` state tracking in `linux_bluetooth_driver.py` to prevent concurrent connection attempts to the same peer
@@ -24,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Prevents BlueZ from maintaining stale connection state after abandoned connection attempts
   - Enables successful reconnection after blacklist period expires
   - Fixes issue where devices could not reconnect after multiple failed attempts due to corrupted BlueZ state
-  - Files: `src/RNS/Interfaces/linux_bluetooth_driver.py` (lines 786-830, 980-1069), `src/RNS/Interfaces/BLEInterface.py` (lines 1475-1490)
+  - Files: `src/RNS/Interfaces/linux_bluetooth_driver.py`, `src/RNS/Interfaces/BLEInterface.py`
 
 - **Scanner interference causing "Operation already in progress" errors during connection attempts**
   - Added `_should_pause_scanning()` method to check for active connections before starting scanner
@@ -34,7 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Prevents BlueZ "InProgress" errors from scanner.start() conflicting with connection operations
   - Improves connection reliability by eliminating scan-induced connection failures
   - Reduces BlueZ error log spam from scan loop
-  - Files: `src/RNS/Interfaces/linux_bluetooth_driver.py` (lines 539-551, 586-588)
+  - Files: `src/RNS/Interfaces/linux_bluetooth_driver.py`
   - Tests: `tests/test_scanner_connection_coordination.py`
 
 - **BR/EDR fallback - clarify ConnectDevice() object path return as success**
@@ -44,7 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Some BlueZ versions report BR/EDR profile unavailable while LE connection succeeds - this is expected
   - Improved logging shows object path for debugging visibility
   - Clarifies that object path return means success, not error
-  - Files: `src/RNS/Interfaces/linux_bluetooth_driver.py` (lines 1121-1132)
+  - Files: `src/RNS/Interfaces/linux_bluetooth_driver.py`
   - Tests: `tests/test_breddr_fallback_prevention.py`
 
 - **GATT server initialization race causing "Reticulum service not found" errors**
@@ -55,8 +64,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Eliminates "service not found" errors during server startup window (typically 50-200ms)
   - Graceful degradation: warns if verification times out but doesn't fail startup
   - Typical verification time: 100-300ms, no runtime performance impact
-  - Files: `src/RNS/Interfaces/linux_bluetooth_driver.py` (lines 1493-1559, 1527-1538)
+  - Files: `src/RNS/Interfaces/linux_bluetooth_driver.py`
   - Tests: `tests/test_gatt_server_readiness.py`
+
+- D-Bus disconnect monitoring switched to ObjectManager with polling fallback
+- Peripheral disconnect cleanup preventing new connections after hitting peer limit
+- Identity mapping cleanup on disconnect (prevents stale peer tracking)
+- RSSI sentinel value filtering (-127 from BlueZ)
+- Columba Android compatibility (filter 1-byte keepalive packets)
+
+### Changed
+- Refactored to driver-based architecture (future Windows/macOS/Android support)
 
 ## [0.1.1] - 2025-11-10
 
@@ -145,7 +163,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known Issues
 - MAC address randomization can cause connection issues (fixed in v2.2.0)
-- Race condition from concurrent connection attempts (fixed in unreleased)
+- Race condition from concurrent connection attempts (fixed in v0.2.2)
 - BR/EDR fallback on dual-mode devices (fixed in v2.2.0)
 
 ---

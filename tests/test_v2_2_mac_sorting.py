@@ -59,11 +59,9 @@ if not hasattr(RNS, 'Identity'):
     RNS.Identity = MagicMock()
     RNS.Identity.full_hash = lambda x: (x * 2)[:16]
 
-# Mock RNS.Interfaces.Interface (required by BLEInterface.py)
-if 'RNS.Interfaces' not in _sys.modules:
-    rns_interfaces_mock = MagicMock()
-    _sys.modules['RNS.Interfaces'] = rns_interfaces_mock
-
+# Mock RNS.Interfaces.Interface module (the base class module, not the whole namespace)
+# We only mock the Interface.py module, allowing BLEInterface.py to be imported from src/
+if 'RNS.Interfaces.Interface' not in _sys.modules:
     # Create mock Interface base class
     class MockInterface:
         MODE_FULL = 1
@@ -72,7 +70,40 @@ if 'RNS.Interfaces' not in _sys.modules:
             self.OUT = True
             self.online = False
 
-    rns_interfaces_mock.Interface = MockInterface
+        @staticmethod
+        def get_config_obj(configuration):
+            """Mock config object wrapper - just returns a dict-like object."""
+            class ConfigObj:
+                def __init__(self, config):
+                    self._config = config if config else {}
+
+                def __getitem__(self, key):
+                    return self._config.get(key)
+
+                def get(self, key, default=None):
+                    return self._config.get(key, default)
+
+                def as_string(self, key, default=None):
+                    val = self._config.get(key, default)
+                    return str(val) if val is not None else default
+
+                def as_int(self, key, default=None):
+                    val = self._config.get(key, default)
+                    return int(val) if val is not None else default
+
+                def as_bool(self, key, default=False):
+                    val = self._config.get(key, default)
+                    if isinstance(val, bool):
+                        return val
+                    if isinstance(val, str):
+                        return val.lower() in ('true', 'yes', '1', 'on')
+                    return bool(val) if val is not None else default
+            return ConfigObj(configuration)
+
+    # Create a mock module for RNS.Interfaces.Interface
+    interface_module = MagicMock()
+    interface_module.Interface = MockInterface
+    _sys.modules['RNS.Interfaces.Interface'] = interface_module
 
 from tests.mock_ble_driver import MockBLEDriver
 from RNS.Interfaces.BLEInterface import BLEInterface, DiscoveredPeer
@@ -212,10 +243,13 @@ class TestMACEdgeCases:
         peers_to_connect = interface._select_peers_to_connect()
         peer_addresses = [p.address for p in peers_to_connect]
 
-        # Should only connect to peer with lower MAC (00)
-        assert "AA:BB:CC:DD:EE:00" in peer_addresses
-        assert "AA:BB:CC:DD:EE:02" not in peer_addresses
-        assert "AA:BB:CC:DD:EE:FF" not in peer_addresses
+        # MAC sorting: lower MAC initiates. Our MAC is AA:BB:CC:DD:EE:01
+        # - AA:BB:CC:DD:EE:00 is LOWER than us, so THEY initiate (we skip)
+        # - AA:BB:CC:DD:EE:02 is HIGHER than us, so WE initiate
+        # - AA:BB:CC:DD:EE:FF is HIGHER than us, so WE initiate
+        assert "AA:BB:CC:DD:EE:00" not in peer_addresses  # They initiate
+        assert "AA:BB:CC:DD:EE:02" in peer_addresses  # We initiate
+        assert "AA:BB:CC:DD:EE:FF" in peer_addresses  # We initiate
 
 
 class TestDualConnectionPrevention:
@@ -269,11 +303,12 @@ class TestDualConnectionPrevention:
         interface.local_address = driver.local_address
 
         # Add peers with MACs above and below ours
+        # MAC sorting: lower MAC initiates. Our MAC is 55:55:55:55:55:55
         peers_data = [
-            ("11:11:11:11:11:11", -60),  # Below (should connect)
-            ("22:22:22:22:22:22", -60),  # Below (should connect)
-            ("AA:AA:AA:AA:AA:AA", -60),  # Above (should NOT connect)
-            ("FF:FF:FF:FF:FF:FF", -60),  # Above (should NOT connect)
+            ("11:11:11:11:11:11", -60),  # LOWER than us - THEY initiate, we skip
+            ("22:22:22:22:22:22", -60),  # LOWER than us - THEY initiate, we skip
+            ("AA:AA:AA:AA:AA:AA", -60),  # HIGHER than us - WE initiate
+            ("FF:FF:FF:FF:FF:FF", -60),  # HIGHER than us - WE initiate
         ]
 
         for addr, rssi in peers_data:
@@ -284,11 +319,11 @@ class TestDualConnectionPrevention:
         peers_to_connect = interface._select_peers_to_connect()
         peer_addresses = [p.address for p in peers_to_connect]
 
-        # Should connect to lower MACs only
-        assert "11:11:11:11:11:11" in peer_addresses
-        assert "22:22:22:22:22:22" in peer_addresses
-        assert "AA:AA:AA:AA:AA:AA" not in peer_addresses
-        assert "FF:FF:FF:FF:FF:FF" not in peer_addresses
+        # MAC sorting: lower MAC initiates, so we connect to HIGHER MACs
+        assert "11:11:11:11:11:11" not in peer_addresses  # They initiate
+        assert "22:22:22:22:22:22" not in peer_addresses  # They initiate
+        assert "AA:AA:AA:AA:AA:AA" in peer_addresses  # We initiate
+        assert "FF:FF:FF:FF:FF:FF" in peer_addresses  # We initiate
 
 
 class TestMACParsingErrors:
@@ -315,6 +350,176 @@ class TestMACParsingErrors:
             # Invalid MAC should fail parsing and fall through to connection attempt
         except Exception as e:
             pytest.fail(f"Invalid MAC should be handled gracefully: {e}")
+
+
+class TestMACRotationBypassesSorting:
+    """
+    Test that MAC rotation bypasses MAC sorting.
+
+    Bug fix: After MAC rotation cleanup, the peer must be added to the connection
+    list regardless of MAC sorting. Previously, the code fell through to the MAC
+    sorting check which could skip the peer if local MAC > peer MAC.
+
+    Fix: After _cleanup_stale_interface(), immediately add peer and continue,
+    bypassing the MAC sorting check.
+    """
+
+    def test_mac_rotation_bypasses_sorting_when_local_mac_higher(self):
+        """
+        Test that MAC rotation adds peer even when local MAC is higher.
+
+        This is the core bug fix test. Without the fix:
+        - MAC rotation detected, stale interface cleaned up
+        - Code falls through to MAC sorting check
+        - Local MAC (FF:...) > Peer MAC (11:...) → peer skipped
+        - Peer interface never recreated!
+
+        With the fix:
+        - MAC rotation detected, stale interface cleaned up
+        - Peer immediately added, continue (bypass MAC sorting)
+        - Peer interface recreated correctly
+        """
+        driver = MockBLEDriver(local_address="FF:FF:FF:FF:FF:FF")  # Higher MAC
+        owner = MockOwner()
+
+        config = {"name": "Test", "enable_central": True}
+        interface = BLEInterface(owner, config)
+        interface.driver = driver
+        interface.local_address = driver.local_address
+
+        # Set up MAC rotation scenario:
+        # - Identity exists at old address
+        # - Peer discovered at new address (lower MAC)
+        # - Old connection is stale (not in peers dict)
+        old_address = "AA:AA:AA:AA:AA:AA"
+        new_address = "11:22:33:44:55:66"  # Lower than local MAC
+        peer_identity = bytes.fromhex("ab5609dfffb33b21a102e1ff81196be5")
+        identity_hash = interface._compute_identity_hash(peer_identity)
+
+        # Set up existing identity mapping at old address
+        interface.identity_to_address[identity_hash] = old_address
+        interface.address_to_identity[new_address] = peer_identity
+
+        # Create a mock spawned interface (stale)
+        mock_peer_interface = MagicMock()
+        interface.spawned_interfaces[identity_hash] = mock_peer_interface
+
+        # old_address NOT in interface.peers (connection is dead/stale)
+
+        # Discover peer at new address
+        peer = DiscoveredPeer(new_address, "RNS-ab5609", -60)
+        interface.discovered_peers[new_address] = peer
+
+        # Select peers to connect
+        peers_to_connect = interface._select_peers_to_connect()
+        peer_addresses = [p.address for p in peers_to_connect]
+
+        # Even though local MAC > peer MAC, peer should be added due to MAC rotation
+        assert new_address in peer_addresses, \
+            "MAC rotation should bypass MAC sorting and add peer"
+
+    def test_mac_rotation_cleanup_is_called(self):
+        """Test that _cleanup_stale_interface is called during MAC rotation."""
+        driver = MockBLEDriver(local_address="FF:FF:FF:FF:FF:FF")
+        owner = MockOwner()
+
+        config = {"name": "Test", "enable_central": True}
+        interface = BLEInterface(owner, config)
+        interface.driver = driver
+        interface.local_address = driver.local_address
+
+        # Track cleanup calls
+        cleanup_calls = []
+        original_cleanup = interface._cleanup_stale_interface
+
+        def tracked_cleanup(identity_hash, old_address):
+            cleanup_calls.append((identity_hash, old_address))
+            return original_cleanup(identity_hash, old_address)
+
+        interface._cleanup_stale_interface = tracked_cleanup
+
+        # Set up MAC rotation scenario
+        old_address = "AA:AA:AA:AA:AA:AA"
+        new_address = "11:22:33:44:55:66"
+        peer_identity = bytes.fromhex("ab5609dfffb33b21a102e1ff81196be5")
+        identity_hash = interface._compute_identity_hash(peer_identity)
+
+        interface.identity_to_address[identity_hash] = old_address
+        interface.address_to_identity[new_address] = peer_identity
+
+        mock_peer_interface = MagicMock()
+        interface.spawned_interfaces[identity_hash] = mock_peer_interface
+
+        # Discover peer at new address
+        peer = DiscoveredPeer(new_address, "RNS-ab5609", -60)
+        interface.discovered_peers[new_address] = peer
+
+        # Select peers
+        interface._select_peers_to_connect()
+
+        # Verify cleanup was called
+        assert len(cleanup_calls) == 1
+        assert cleanup_calls[0] == (identity_hash, old_address)
+
+    def test_active_connection_prevents_rotation_cleanup(self):
+        """Test that active connection prevents MAC rotation cleanup."""
+        driver = MockBLEDriver(local_address="FF:FF:FF:FF:FF:FF")
+        owner = MockOwner()
+
+        config = {"name": "Test", "enable_central": True}
+        interface = BLEInterface(owner, config)
+        interface.driver = driver
+        interface.local_address = driver.local_address
+
+        # Set up scenario where old connection is ACTIVE
+        old_address = "AA:AA:AA:AA:AA:AA"
+        new_address = "11:22:33:44:55:66"
+        peer_identity = bytes.fromhex("ab5609dfffb33b21a102e1ff81196be5")
+        identity_hash = interface._compute_identity_hash(peer_identity)
+
+        interface.identity_to_address[identity_hash] = old_address
+        interface.address_to_identity[new_address] = peer_identity
+
+        mock_peer_interface = MagicMock()
+        interface.spawned_interfaces[identity_hash] = mock_peer_interface
+
+        # OLD connection is ACTIVE (in peers dict)
+        interface.peers[old_address] = {"mtu": 512}
+
+        # Discover peer at new address
+        peer = DiscoveredPeer(new_address, "RNS-ab5609", -60)
+        interface.discovered_peers[new_address] = peer
+
+        # Select peers
+        peers_to_connect = interface._select_peers_to_connect()
+        peer_addresses = [p.address for p in peers_to_connect]
+
+        # Should NOT add peer (old connection still active)
+        assert new_address not in peer_addresses, \
+            "Active connection should prevent MAC rotation"
+
+    def test_normal_mac_sorting_still_works(self):
+        """Test that normal MAC sorting still works when no rotation."""
+        driver = MockBLEDriver(local_address="FF:FF:FF:FF:FF:FF")  # Higher MAC
+        owner = MockOwner()
+
+        config = {"name": "Test", "enable_central": True}
+        interface = BLEInterface(owner, config)
+        interface.driver = driver
+        interface.local_address = driver.local_address
+
+        # No existing identity mapping - this is a completely new peer
+        peer_address = "11:22:33:44:55:66"  # Lower MAC
+        peer = DiscoveredPeer(peer_address, "NewPeer", -60)
+        interface.discovered_peers[peer_address] = peer
+
+        # Select peers
+        peers_to_connect = interface._select_peers_to_connect()
+        peer_addresses = [p.address for p in peers_to_connect]
+
+        # Should NOT add peer (they have lower MAC, they should initiate)
+        assert peer_address not in peer_addresses, \
+            "Normal MAC sorting should skip peer with lower MAC"
 
 
 if __name__ == "__main__":
