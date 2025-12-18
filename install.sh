@@ -920,6 +920,105 @@ fi
 
 echo
 
+# Step 5D: BlueZ JustWorksRepairing Configuration
+print_header "BlueZ JustWorksRepairing Configuration"
+
+BLUEZ_CONF="/etc/bluetooth/main.conf"
+
+if [ -f "$BLUEZ_CONF" ]; then
+    print_info "Checking JustWorksRepairing setting in $BLUEZ_CONF..."
+
+    # Extract current JustWorksRepairing setting (handle commented lines)
+    CURRENT_SETTING=$(grep -E "^#?\s*JustWorksRepairing\s*=" "$BLUEZ_CONF" 2>/dev/null | tail -1 | sed 's/.*=\s*//' | tr -d '[:space:]')
+
+    if [ "$CURRENT_SETTING" = "always" ]; then
+        print_success "JustWorksRepairing is already set to 'always'"
+    else
+        if [ -z "$CURRENT_SETTING" ]; then
+            print_info "JustWorksRepairing not found in config (using BlueZ default: never)"
+        else
+            print_info "JustWorksRepairing is currently set to: $CURRENT_SETTING"
+        fi
+
+        print_info "Setting JustWorksRepairing to 'always' for automatic BLE mesh pairing..."
+        echo
+        print_info "Background: BlueZ's JustWorksRepairing controls automatic pairing"
+        print_info "for peer-initiated connections. Setting to 'always' enables zero-touch"
+        print_info "mesh networking. Reticulum provides its own cryptographic security."
+        echo
+
+        # Modify the configuration file
+        if [ "$EUID" -eq 0 ]; then
+            # Running as root - no sudo needed
+            # First, comment out any existing JustWorksRepairing lines
+            sed -i 's/^\s*JustWorksRepairing\s*=.*/#&/' "$BLUEZ_CONF"
+
+            # Add our setting to the [General] section or append if no section exists
+            if grep -q "^\[General\]" "$BLUEZ_CONF"; then
+                # Insert after [General] section header
+                sed -i '/^\[General\]/a JustWorksRepairing = always' "$BLUEZ_CONF"
+            else
+                # No [General] section, append at end
+                echo "" >> "$BLUEZ_CONF"
+                echo "[General]" >> "$BLUEZ_CONF"
+                echo "JustWorksRepairing = always" >> "$BLUEZ_CONF"
+            fi
+
+            # Restart bluetooth service (non-fatal in container/CI environments)
+            print_info "Restarting bluetooth service to apply changes..."
+            systemctl daemon-reload 2>/dev/null || true
+            systemctl restart bluetooth 2>/dev/null || true
+        else
+            # Not root - use sudo
+            # First, comment out any existing JustWorksRepairing lines
+            sudo sed -i 's/^\s*JustWorksRepairing\s*=.*/#&/' "$BLUEZ_CONF"
+
+            # Add our setting to the [General] section or append if no section exists
+            if grep -q "^\[General\]" "$BLUEZ_CONF"; then
+                # Insert after [General] section header
+                sudo sed -i '/^\[General\]/a JustWorksRepairing = always' "$BLUEZ_CONF"
+            else
+                # No [General] section, append at end
+                echo "" | sudo tee -a "$BLUEZ_CONF" > /dev/null
+                echo "[General]" | sudo tee -a "$BLUEZ_CONF" > /dev/null
+                echo "JustWorksRepairing = always" | sudo tee -a "$BLUEZ_CONF" > /dev/null
+            fi
+
+            # Restart bluetooth service (non-fatal in container/CI environments)
+            print_info "Restarting bluetooth service to apply changes..."
+            sudo systemctl daemon-reload 2>/dev/null || true
+            sudo systemctl restart bluetooth 2>/dev/null || true
+        fi
+
+        # Verify the setting was applied
+        sleep 1
+        VERIFY_SETTING=$(grep -E "^JustWorksRepairing\s*=\s*always" "$BLUEZ_CONF" 2>/dev/null)
+        if [ -n "$VERIFY_SETTING" ]; then
+            print_success "JustWorksRepairing set to 'always' successfully"
+
+            # Verify bluetooth service is running (skip in container environments)
+            if systemctl is-active --quiet bluetooth 2>/dev/null; then
+                print_success "Bluetooth service restarted successfully"
+            elif command -v systemctl &> /dev/null && [ ! -f /.dockerenv ]; then
+                # Only show warning if systemctl exists and we're not in a container
+                print_warning "Bluetooth service may need manual restart"
+                print_info "Check status with: sudo systemctl status bluetooth"
+            else
+                # Container environment or systemd not available
+                print_info "Configuration updated (service restart skipped in container environment)"
+            fi
+        else
+            print_error "Failed to set JustWorksRepairing in $BLUEZ_CONF"
+            print_warning "You may need to manually add 'JustWorksRepairing = always' to [General] section"
+        fi
+    fi
+else
+    print_warning "$BLUEZ_CONF not found"
+    print_info "JustWorksRepairing configuration skipped (BlueZ may not be installed)"
+fi
+
+echo
+
 # Step 6: Configuration
 print_header "Configuration"
 
