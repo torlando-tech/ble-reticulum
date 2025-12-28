@@ -1891,9 +1891,11 @@ class BluezeroGATTServer:
                 if RNS:
                     RNS.log(f"{self.log_prefix} [GATT-MONITOR] Entering wait loop...", RNS.LOG_EXTREME)
 
-                # Poll stop_event and yield to event loop to process D-Bus messages
+                # Yield to event loop to process D-Bus messages
+                # Use 5s interval to reduce collision probability with scan/advertise
+                # on BCM43xx single-radio chips while still allowing stop_event checks
                 while not self.stop_event.is_set():
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(5.0)
 
                 if RNS:
                     RNS.log(f"{self.log_prefix} [GATT-MONITOR] Stop event set, exiting loop", RNS.LOG_EXTREME)
@@ -1964,8 +1966,10 @@ class BluezeroGATTServer:
 
         while not self.stop_event.is_set():
             try:
-                # Wait for 30 seconds (check stop_event frequently)
-                for _ in range(60):  # 60 * 0.5s = 30s
+                # Wait for 120 seconds (check stop_event frequently)
+                # Increased from 30s to reduce collision probability with scan/advertise
+                # on BCM43xx single-radio chips
+                for _ in range(240):  # 240 * 0.5s = 120s
                     if self.stop_event.is_set():
                         break
                     time.sleep(0.5)
