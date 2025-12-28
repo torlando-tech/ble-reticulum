@@ -1612,6 +1612,10 @@ class BluezeroGATTServer:
         self.stop_event = threading.Event()
         self.started_event = threading.Event()
 
+        # Event-driven shutdown for D-Bus monitor thread
+        self._monitor_loop = None  # Reference to asyncio loop in monitor thread
+        self._async_stop_event = None  # asyncio.Event for clean shutdown
+
         # Connected centrals (address -> info dict)
         self.connected_centrals: Dict[str, dict] = {}
         self.centrals_lock = threading.RLock()
@@ -1748,6 +1752,12 @@ class BluezeroGATTServer:
             device_proxies = {}  # Track proxy objects for each device
 
             try:
+                # Set up event-driven shutdown mechanism
+                loop = asyncio.get_running_loop()
+                async_stop = asyncio.Event()
+                self._monitor_loop = loop
+                self._async_stop_event = async_stop
+
                 # Connect to system bus
                 if RNS:
                     RNS.log(f"{self.log_prefix} [GATT-MONITOR] Connecting to D-Bus...", RNS.LOG_EXTREME)
@@ -1891,15 +1901,14 @@ class BluezeroGATTServer:
                 if RNS:
                     RNS.log(f"{self.log_prefix} [GATT-MONITOR] Entering wait loop...", RNS.LOG_EXTREME)
 
-                # Yield to event loop to process D-Bus messages
-                # Use 5s interval to reduce collision probability with scan/advertise
-                # on BCM43xx single-radio chips while still allowing stop_event checks
-                while not self.stop_event.is_set():
-                    await asyncio.sleep(5.0)
+                # Wait for stop signal (event-driven, no polling)
+                # D-Bus signals are processed automatically by the event loop
+                # The async_stop event is set via call_soon_threadsafe from stop()
+                await async_stop.wait()
 
                 if RNS:
-                    RNS.log(f"{self.log_prefix} [GATT-MONITOR] Stop event set, exiting loop", RNS.LOG_EXTREME)
-                self._log("D-Bus monitoring loop exiting", "DEBUG")
+                    RNS.log(f"{self.log_prefix} [GATT-MONITOR] Stop event received, exiting loop", RNS.LOG_EXTREME)
+                self._log("D-Bus monitoring loop exiting (stop signal received)", "DEBUG")
 
             except Exception as e:
                 if RNS:
@@ -1966,16 +1975,11 @@ class BluezeroGATTServer:
 
         while not self.stop_event.is_set():
             try:
-                # Wait for 120 seconds (check stop_event frequently)
-                # Increased from 30s to reduce collision probability with scan/advertise
-                # on BCM43xx single-radio chips
-                for _ in range(240):  # 240 * 0.5s = 120s
-                    if self.stop_event.is_set():
-                        break
-                    time.sleep(0.5)
-
-                if self.stop_event.is_set():
-                    break
+                # Wait for 300 seconds (5 min), wake immediately on stop signal
+                # This is a fallback safety net for missed D-Bus signals
+                # Using threading.Event.wait() instead of busy-loop for clean shutdown
+                if self.stop_event.wait(timeout=300.0):
+                    break  # Stop was signaled
 
                 # Check all connected centrals
                 with self.centrals_lock:
@@ -2144,6 +2148,13 @@ class BluezeroGATTServer:
         # Signal server thread to stop
         self.stop_event.set()
         self.running = False
+
+        # Wake the async D-Bus monitor loop immediately (event-driven shutdown)
+        if self._monitor_loop and self._async_stop_event:
+            try:
+                self._monitor_loop.call_soon_threadsafe(self._async_stop_event.set)
+            except RuntimeError:
+                pass  # Loop already stopped
 
         # Wait for server thread to exit
         if self.server_thread and self.server_thread.is_alive():
