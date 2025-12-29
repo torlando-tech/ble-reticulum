@@ -52,7 +52,7 @@ def mock_driver():
     driver = Mock()
     driver.loop = asyncio.new_event_loop()
     driver._peers = {}  # address -> peer_conn
-    driver._peers_lock = asyncio.Lock()
+    driver._peers_lock = threading.RLock()  # Use threading lock for mock (asyncio.Lock requires event loop in Py3.8/3.9)
     driver._log = Mock()
     driver.on_device_disconnected = Mock()
 
