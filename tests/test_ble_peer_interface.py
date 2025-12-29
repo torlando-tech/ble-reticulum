@@ -7,6 +7,7 @@ including data flow, fragmentation, and both central/peripheral modes.
 
 import pytest
 import asyncio
+import threading
 from unittest.mock import Mock, AsyncMock, patch, MagicMock
 
 # Import fragmentation for testing
@@ -36,8 +37,8 @@ def create_mock_peer_interface(peer_address="AA:BB:CC:DD:EE:FF", peer_name="Test
     parent.peers = {peer_address: (Mock(is_connected=True), 0, 185)}
     parent.fragmenters = {peer_address: BLEFragmenter(mtu=185) if BLEFragmenter else Mock()}
     parent.reassemblers = {peer_address: BLEReassembler() if BLEReassembler else Mock()}
-    parent.frag_lock = asyncio.Lock()
-    parent.peer_lock = asyncio.Lock()
+    parent.frag_lock = threading.RLock()  # Use threading lock for mock
+    parent.peer_lock = threading.RLock()  # Use threading lock for mock
     parent.loop = asyncio.get_event_loop()
     parent.gatt_server = Mock()
     parent.gatt_server.send_notification = AsyncMock(return_value=True)

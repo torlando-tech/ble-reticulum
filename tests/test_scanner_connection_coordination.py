@@ -24,6 +24,7 @@ import pytest
 import sys
 import os
 import asyncio
+import threading
 from unittest.mock import Mock, AsyncMock, patch
 
 # Add src to path
@@ -54,7 +55,7 @@ class TestScannerConnectionCoordination:
         driver = Mock()
         driver.loop = asyncio.new_event_loop()
         driver._connecting_peers = set()
-        driver._connecting_lock = asyncio.Lock()
+        driver._connecting_lock = threading.RLock()  # Use threading lock for mock (asyncio.Lock requires event loop in Py3.8/3.9)
         driver._log = Mock()
         return driver
 
