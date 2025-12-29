@@ -380,7 +380,8 @@ if [[ "$ARCH" == "armhf" ]] || [[ "$(uname -m)" =~ ^(armv6l|armv7l)$ ]]; then
         print_info "This saves ~20 minutes of compilation time on Pi Zero W"
 
         WHEEL_URL="https://github.com/torlando-tech/ble-reticulum/releases/download/armv6l-wheels-v1/dbus_fast-2.44.5-cp313-cp313-linux_armv6l.whl"
-        WHEEL_FILE="/tmp/dbus_fast-armv6l-$$.whl"
+        # Use proper wheel filename - pip extracts metadata from the filename
+        WHEEL_FILE="/tmp/dbus_fast-2.44.5-cp313-cp313-linux_armv6l.whl"
 
         if curl -sL "$WHEEL_URL" -o "$WHEEL_FILE" 2>/dev/null; then
             if [ -f "$WHEEL_FILE" ] && [ -s "$WHEEL_FILE" ]; then

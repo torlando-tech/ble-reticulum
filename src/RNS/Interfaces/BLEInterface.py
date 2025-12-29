@@ -1036,9 +1036,11 @@ class BLEInterface(Interface):
             old_interface.detach()
             RNS.log(f"{self} detached stale interface for {identity_hash[:8]}", RNS.LOG_DEBUG)
 
-        # Clean up address mappings
+        # Clean up address mappings (both directions)
         if identity_hash in self.identity_to_address:
             del self.identity_to_address[identity_hash]
+        if old_address in self.address_to_identity:
+            del self.address_to_identity[old_address]
 
         # Clean up fragmenter/reassembler for old address
         if peer_identity:
