@@ -24,6 +24,7 @@ import pytest
 import sys
 import os
 import asyncio
+import threading
 from unittest.mock import Mock, MagicMock, AsyncMock, patch, call
 
 # Add src to path
@@ -54,7 +55,7 @@ class TestBlueZStateCleanup:
         driver = Mock()
         driver.loop = asyncio.new_event_loop()
         driver._connecting_peers = set()
-        driver._connecting_lock = asyncio.Lock()
+        driver._connecting_lock = threading.RLock()  # Use threading lock for mock
         driver._remove_bluez_device = AsyncMock(return_value=True)
         driver._log = Mock()
         return driver

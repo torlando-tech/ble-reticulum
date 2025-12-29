@@ -25,6 +25,7 @@ if src_dir not in sys.path:
 
 import pytest
 import asyncio
+import threading
 import time
 from unittest.mock import Mock, AsyncMock, MagicMock, patch
 from types import ModuleType
@@ -309,8 +310,8 @@ def create_mock_ble_interface(owner=None, config=None):
     interface.connection_blacklist = {}
     interface.fragmenters = {}
     interface.reassemblers = {}
-    interface.peer_lock = asyncio.Lock()
-    interface.frag_lock = asyncio.Lock()
+    interface.peer_lock = threading.RLock()  # Use threading lock for mock
+    interface.frag_lock = threading.RLock()  # Use threading lock for mock
     interface.loop = asyncio.get_event_loop()
     interface.max_peers = config.get('max_connections', 7) if config else 7
     interface.min_rssi = config.get('min_rssi', -80) if config else -80

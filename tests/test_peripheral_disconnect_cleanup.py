@@ -71,7 +71,7 @@ class TestPeripheralDisconnectCleanup:
         gatt_server = Mock()
         gatt_server.driver = mock_driver
         gatt_server.connected_centrals = {}
-        gatt_server.centrals_lock = asyncio.Lock()
+        gatt_server.centrals_lock = threading.RLock()  # Use threading lock for mock
         gatt_server.running = True
         gatt_server._log = Mock()
 
