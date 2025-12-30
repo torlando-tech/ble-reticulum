@@ -52,7 +52,7 @@ def mock_driver():
     driver = Mock()
     driver.loop = asyncio.new_event_loop()
     driver._peers = {}  # address -> peer_conn
-    driver._peers_lock = asyncio.Lock()
+    driver._peers_lock = threading.RLock()  # Use threading lock for mock (asyncio.Lock requires event loop in Py3.8/3.9)
     driver._log = Mock()
     driver.on_device_disconnected = Mock()
 
@@ -71,7 +71,7 @@ class TestPeripheralDisconnectCleanup:
         gatt_server = Mock()
         gatt_server.driver = mock_driver
         gatt_server.connected_centrals = {}
-        gatt_server.centrals_lock = asyncio.Lock()
+        gatt_server.centrals_lock = threading.RLock()  # Use threading lock for mock
         gatt_server.running = True
         gatt_server._log = Mock()
 

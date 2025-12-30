@@ -1036,9 +1036,11 @@ class BLEInterface(Interface):
             old_interface.detach()
             RNS.log(f"{self} detached stale interface for {identity_hash[:8]}", RNS.LOG_DEBUG)
 
-        # Clean up address mappings
+        # Clean up address mappings (both directions)
         if identity_hash in self.identity_to_address:
             del self.identity_to_address[identity_hash]
+        if old_address in self.address_to_identity:
+            del self.address_to_identity[old_address]
 
         # Clean up fragmenter/reassembler for old address
         if peer_identity:
@@ -1448,15 +1450,17 @@ class BLEInterface(Interface):
 
     def _compute_identity_hash(self, peer_identity):
         """
-        Compute 16-character hex identity hash for interface tracking.
+        Convert 16-byte identity to 16-character hex string for interface tracking.
 
         Args:
-            peer_identity: 16-byte peer identity
+            peer_identity: 16-byte peer identity (already a hash from BLE handshake)
 
         Returns:
-            str: Identity hash (16 hex chars)
+            str: First 16 hex chars of identity (8 bytes)
         """
-        return RNS.Identity.full_hash(peer_identity)[:16].hex()[:16]
+        # peer_identity is already the identity hash from BLE handshake
+        # Just convert to hex, don't re-hash (that would corrupt the identity!)
+        return peer_identity.hex()[:16]
 
     def _spawn_peer_interface(self, address, name, peer_identity, client=None, mtu=None, connection_type="central"):
         """
