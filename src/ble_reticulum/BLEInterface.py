@@ -67,10 +67,7 @@ except NameError:
 if _interface_dir not in sys.path:
     sys.path.insert(0, _interface_dir)
 
-# Import base Interface class
-# When integrated into Reticulum, this will be:
-# from RNS.Interfaces.Interface import Interface
-# For now, we'll need to handle the import path
+# Import base Interface class from Reticulum
 try:
     from RNS.Interfaces.Interface import Interface
 except ImportError:
@@ -85,7 +82,7 @@ try:
     from BLEFragmentation import BLEFragmenter, BLEReassembler
 except ImportError:
     # Fallback for when loaded as part of RNS package
-    from RNS.Interfaces.BLEFragmentation import BLEFragmenter, BLEReassembler
+    from ble_reticulum.BLEFragmentation import BLEFragmenter, BLEReassembler
 
 # Import GATT server for peripheral mode
 try:
@@ -93,7 +90,7 @@ try:
     HAS_GATT_SERVER = True
 except ImportError:
     try:
-        from RNS.Interfaces.BLEGATTServer import BLEGATTServer
+        from ble_reticulum.BLEGATTServer import BLEGATTServer
         HAS_GATT_SERVER = True
     except ImportError:
         HAS_GATT_SERVER = False
@@ -102,7 +99,7 @@ except ImportError:
 try:
     from bluetooth_driver import BLEDriverInterface, BLEDevice
 except ImportError:
-    from RNS.Interfaces.bluetooth_driver import BLEDriverInterface, BLEDevice
+    from ble_reticulum.bluetooth_driver import BLEDriverInterface, BLEDevice
 
 # Import platform-specific driver (optional - can be overridden by subclasses)
 try:
@@ -110,7 +107,7 @@ try:
     HAS_LINUX_DRIVER = True
 except ImportError:
     try:
-        from RNS.Interfaces.linux_bluetooth_driver import LinuxBluetoothDriver
+        from ble_reticulum.linux_bluetooth_driver import LinuxBluetoothDriver
         HAS_LINUX_DRIVER = True
     except ImportError:
         HAS_LINUX_DRIVER = False

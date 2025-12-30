@@ -23,12 +23,12 @@ def test_config_options():
 
 def test_interface_has_gatt_integration():
     """Test that BLEInterface.py uses driver abstraction for peripheral mode."""
-    interface_path = os.path.join(os.path.dirname(__file__), '../src/RNS/Interfaces/BLEInterface.py')
+    interface_path = os.path.join(os.path.dirname(__file__), '../src/ble_reticulum/BLEInterface.py')
     with open(interface_path, 'r') as f:
         code = f.read()
 
     # Check for driver-based architecture
-    assert 'from RNS.Interfaces.bluetooth_driver import BLEDriverInterface' in code or 'bluetooth_driver' in code
+    assert 'from ble_reticulum.bluetooth_driver import BLEDriverInterface' in code or 'bluetooth_driver' in code
 
     # Check for peripheral mode configuration
     assert 'enable_peripheral' in code
@@ -48,7 +48,7 @@ def test_interface_has_gatt_integration():
 
 def test_peer_interface_has_routing():
     """Test that BLEPeerInterface uses driver for sending."""
-    interface_path = os.path.join(os.path.dirname(__file__), '../src/RNS/Interfaces/BLEInterface.py')
+    interface_path = os.path.join(os.path.dirname(__file__), '../src/ble_reticulum/BLEInterface.py')
     with open(interface_path, 'r') as f:
         code = f.read()
 
@@ -64,7 +64,7 @@ def test_peer_interface_has_routing():
 
 def test_gatt_server_file_exists():
     """Test that BLEGATTServer module exists."""
-    server_path = os.path.join(os.path.dirname(__file__), '../src/RNS/Interfaces/BLEGATTServer.py')
+    server_path = os.path.join(os.path.dirname(__file__), '../src/ble_reticulum/BLEGATTServer.py')
     assert os.path.exists(server_path)
 
     with open(server_path, 'r') as f:
@@ -80,7 +80,7 @@ def test_gatt_server_file_exists():
 def test_driver_abstraction_exists():
     """Test that driver abstraction layer is properly implemented."""
     # Check driver interface exists
-    driver_interface_path = os.path.join(os.path.dirname(__file__), '../src/RNS/Interfaces/bluetooth_driver.py')
+    driver_interface_path = os.path.join(os.path.dirname(__file__), '../src/ble_reticulum/bluetooth_driver.py')
     assert os.path.exists(driver_interface_path)
 
     with open(driver_interface_path, 'r') as f:
@@ -91,7 +91,7 @@ def test_driver_abstraction_exists():
     assert 'ABC' in code or 'abstractmethod' in code
 
     # Check Linux driver implementation exists
-    linux_driver_path = os.path.join(os.path.dirname(__file__), '../src/RNS/Interfaces/linux_bluetooth_driver.py')
+    linux_driver_path = os.path.join(os.path.dirname(__file__), '../src/ble_reticulum/linux_bluetooth_driver.py')
     assert os.path.exists(linux_driver_path)
 
     with open(linux_driver_path, 'r') as f:
@@ -118,7 +118,7 @@ def test_identity_based_fragmenter_keying():
 
     Reference: BLE_PROTOCOL_v2.2.md §7 Identity-Based Keying
     """
-    interface_path = os.path.join(os.path.dirname(__file__), '../src/RNS/Interfaces/BLEInterface.py')
+    interface_path = os.path.join(os.path.dirname(__file__), '../src/ble_reticulum/BLEInterface.py')
     with open(interface_path, 'r') as f:
         code = f.read()
 

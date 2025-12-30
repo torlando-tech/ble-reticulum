@@ -13,7 +13,7 @@ from unittest.mock import Mock, AsyncMock, patch, MagicMock
 # conftest.py handles path setup - imports should work after that
 # Import only what we need for testing
 try:
-    from RNS.Interfaces.BLEFragmentation import BLEFragmenter, BLEReassembler
+    from ble_reticulum.BLEFragmentation import BLEFragmenter, BLEReassembler
 except ImportError:
     # If imports fail, tests will be skipped
     BLEFragmenter = None

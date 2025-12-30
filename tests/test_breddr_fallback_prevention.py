@@ -61,7 +61,7 @@ class TestBREDRFallbackPrevention:
         This tests the pure logic of parameter building, which is fully
         unit-testable without D-Bus.
         """
-        from RNS.Interfaces import linux_bluetooth_driver
+        from ble_reticulum import linux_bluetooth_driver
 
         # Mock driver
         driver = Mock()
@@ -97,7 +97,7 @@ class TestBREDRFallbackPrevention:
         This test verifies that we handle the object path return value
         properly instead of ignoring it.
         """
-        from RNS.Interfaces import linux_bluetooth_driver
+        from ble_reticulum import linux_bluetooth_driver
 
         # Mock the D-Bus call to return an object path (what BlueZ actually returns)
         mock_object_path = "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF"

@@ -254,8 +254,24 @@ if command -v rnsd &> /dev/null; then
     if [ -n "$RNS_LOCATION" ]; then
         print_success "Found RNS Python package at: $RNS_LOCATION"
 
-        # Check if it's a pipx installation (most specific, check first)
-        if [[ "$RNS_LOCATION" == *"/pipx/venvs/"* ]]; then
+        # Check if it's a uv tool installation (most specific, check first)
+        if [[ "$RNS_LOCATION" == *"/uv/tools/"* ]]; then
+            print_info "RNS appears to be installed via uv tool"
+
+            # Extract uv tools path (e.g., ~/.local/share/uv/tools/rns)
+            UV_RNS_PATH=$(echo "$RNS_LOCATION" | grep -oP '^.*?/uv/tools/rns')
+            RNS_PYTHON="$UV_RNS_PATH/bin/python"
+
+            if [ ! -f "$RNS_PYTHON" ]; then
+                print_error "uv Python not found at: $RNS_PYTHON"
+                exit 1
+            fi
+
+            INSTALL_MODE="uv"
+            print_success "Detected uv tool installation at: $UV_RNS_PATH"
+
+        # Check if it's a pipx installation
+        elif [[ "$RNS_LOCATION" == *"/pipx/venvs/"* ]]; then
             print_info "RNS appears to be installed via pipx"
 
             # Verify pipx command is available
@@ -307,6 +323,55 @@ if command -v rnsd &> /dev/null; then
             print_info "RNS is installed system-wide"
             INSTALL_MODE="system"
             RNS_PYTHON="python3"
+        fi
+    else
+        # rnsd exists but python3 can't import RNS
+        # This happens with uv/pipx when system python3 differs from tool's python
+        print_warning "rnsd found but RNS not importable by system python3"
+        print_info "Checking rnsd shebang for isolated environment..."
+
+        RNSD_PATH=$(which rnsd)
+        RNSD_SHEBANG=$(head -1 "$RNSD_PATH" 2>/dev/null)
+
+        if [[ "$RNSD_SHEBANG" == *"/uv/tools/rns/"* ]]; then
+            # uv tool installation
+            print_info "RNS appears to be installed via uv tool"
+            UV_RNS_PATH=$(echo "$RNSD_SHEBANG" | grep -oP '^#!\K.*?/uv/tools/rns' || echo "$HOME/.local/share/uv/tools/rns")
+            RNS_PYTHON="$UV_RNS_PATH/bin/python"
+
+            if [ -f "$RNS_PYTHON" ]; then
+                INSTALL_MODE="uv"
+                print_success "Detected uv tool installation at: $UV_RNS_PATH"
+            else
+                print_error "uv Python not found at: $RNS_PYTHON"
+                exit 1
+            fi
+
+        elif [[ "$RNSD_SHEBANG" == *"/pipx/venvs/rns/"* ]]; then
+            # pipx installation
+            print_info "RNS appears to be installed via pipx"
+            PIPX_RNS_PATH=$(echo "$RNSD_SHEBANG" | grep -oP '^#!\K.*?/pipx/venvs/rns' || echo "$HOME/.local/pipx/venvs/rns")
+            RNS_PYTHON="$PIPX_RNS_PATH/bin/python3"
+
+            if [ -f "$RNS_PYTHON" ]; then
+                INSTALL_MODE="pipx"
+                print_success "Detected pipx installation at: $PIPX_RNS_PATH"
+            else
+                print_error "pipx Python not found at: $RNS_PYTHON"
+                exit 1
+            fi
+
+        else
+            print_error "Could not determine RNS installation type from rnsd shebang"
+            print_info "Shebang: $RNSD_SHEBANG"
+            echo
+            echo "Please ensure RNS is properly installed and accessible to python3:"
+            echo "  pip install rns"
+            echo "  # or"
+            echo "  uv tool install rns"
+            echo "  # or"
+            echo "  pipx install rns"
+            exit 1
         fi
     fi
 else
@@ -400,7 +465,42 @@ if [[ "$ARCH" == "armhf" ]] || [[ "$(uname -m)" =~ ^(armv6l|armv7l)$ ]]; then
     fi
 fi
 
-if [ "$INSTALL_MODE" = "pipx" ]; then
+if [ "$INSTALL_MODE" = "uv" ]; then
+    print_info "Installing dependencies into uv tool environment..."
+    echo
+
+    # uv tool environments are at ~/.local/share/uv/tools/<name>
+    # We install directly using the tool's pip
+    DEPS=("bleak==1.1.1" "bluezero" "dbus-python")
+
+    for dep in "${DEPS[@]}"; do
+        print_info "Installing $dep into RNS environment..."
+
+        if uv pip install --python "$RNS_PYTHON" "$dep" 2>/dev/null; then
+            print_success "Installed $dep"
+        else
+            print_error "Failed to install $dep"
+            echo
+            echo "Try manually:"
+            echo "  uv pip install --python $RNS_PYTHON $dep"
+            exit 1
+        fi
+        echo
+    done
+
+    # Verify all modules can be imported
+    print_info "Verifying dependencies..."
+    if "$RNS_PYTHON" -c "import bleak, bluezero, dbus" 2>/dev/null; then
+        print_success "All dependencies verified and working"
+    else
+        print_error "Dependency verification failed"
+        echo
+        echo "Test imports manually:"
+        echo "  $RNS_PYTHON -c 'import bleak, bluezero, dbus'"
+        exit 1
+    fi
+
+elif [ "$INSTALL_MODE" = "pipx" ]; then
     print_info "Installing dependencies via pipx inject..."
     print_warning "dbus-python will be compiled from source (may take 2-3 minutes)"
     echo
@@ -494,9 +594,9 @@ mkdir -p "$INTERFACES_DIR"
 
 # Copy interface files
 print_info "Copying BLE interface files to: $INTERFACES_DIR"
-cp src/RNS/Interfaces/BLE*.py \
-   src/RNS/Interfaces/bluetooth_driver.py \
-   src/RNS/Interfaces/linux_bluetooth_driver.py \
+cp src/ble_reticulum/BLE*.py \
+   src/ble_reticulum/bluetooth_driver.py \
+   src/ble_reticulum/linux_bluetooth_driver.py \
    "$INTERFACES_DIR/"
 
 # Create __init__.py if it doesn't exist
@@ -568,7 +668,10 @@ else
         print_info "Root user already has all required Bluetooth permissions"
     elif command -v setcap &> /dev/null; then
         # Determine correct Python path based on installation mode
-        if [ "$INSTALL_MODE" = "pipx" ]; then
+        if [ "$INSTALL_MODE" = "uv" ]; then
+            PYTHON_PATH="$UV_RNS_PATH/bin/python"
+            print_info "Using uv Python: $PYTHON_PATH"
+        elif [ "$INSTALL_MODE" = "pipx" ]; then
             PYTHON_PATH="$PIPX_RNS_PATH/bin/python3"
             print_info "Using pipx Python: $PYTHON_PATH"
         elif [ "$INSTALL_MODE" = "venv" ]; then

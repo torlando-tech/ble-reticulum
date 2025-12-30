@@ -56,7 +56,7 @@ class TestEventDrivenDBusMonitor:
     @pytest.fixture
     def mock_gatt_server(self, mock_driver):
         """Create mock GATT server with event-driven monitoring setup."""
-        from RNS.Interfaces.linux_bluetooth_driver import BluezeroGATTServer
+        from ble_reticulum.linux_bluetooth_driver import BluezeroGATTServer
 
         server = Mock(spec=BluezeroGATTServer)
         server.driver = mock_driver
@@ -729,7 +729,7 @@ class TestCodeVerification:
         # Read the actual source file
         source_path = os.path.join(
             os.path.dirname(__file__),
-            '../src/RNS/Interfaces/linux_bluetooth_driver.py'
+            '../src/ble_reticulum/linux_bluetooth_driver.py'
         )
 
         with open(source_path, 'r') as f:
@@ -748,7 +748,7 @@ class TestCodeVerification:
 
         source_path = os.path.join(
             os.path.dirname(__file__),
-            '../src/RNS/Interfaces/linux_bluetooth_driver.py'
+            '../src/ble_reticulum/linux_bluetooth_driver.py'
         )
 
         with open(source_path, 'r') as f:
@@ -776,7 +776,7 @@ class TestCodeVerification:
         """Verify that stop() uses call_soon_threadsafe."""
         source_path = os.path.join(
             os.path.dirname(__file__),
-            '../src/RNS/Interfaces/linux_bluetooth_driver.py'
+            '../src/ble_reticulum/linux_bluetooth_driver.py'
         )
 
         with open(source_path, 'r') as f:

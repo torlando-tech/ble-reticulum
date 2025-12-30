@@ -21,7 +21,7 @@ import asyncio
 # Add parent directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../src'))
 
-from RNS.Interfaces.BLEFragmentation import BLEFragmenter, BLEReassembler
+from ble_reticulum.BLEFragmentation import BLEFragmenter, BLEReassembler
 
 
 def test_fragmentation():

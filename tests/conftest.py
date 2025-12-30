@@ -14,7 +14,7 @@ project_root = os.path.dirname(tests_dir)
 src_dir = os.path.join(project_root, 'src')
 
 # Add src/ to path for BLE interface modules
-# This allows tests to import from src/RNS/Interfaces/
+# This allows tests to import from src/ble_reticulum/
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
@@ -237,7 +237,7 @@ def sample_configuration():
 def sample_discovered_peers():
     """Sample DiscoveredPeer objects for testing."""
     try:
-        from RNS.Interfaces.BLEInterface import DiscoveredPeer
+        from ble_reticulum.BLEInterface import DiscoveredPeer
     except ImportError:
         # Create a simple mock DiscoveredPeer for testing
         import time

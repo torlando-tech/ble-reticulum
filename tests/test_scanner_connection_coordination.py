@@ -70,7 +70,7 @@ class TestScannerConnectionCoordination:
         if scanning should be paused based on connection state.
         """
         # Import the actual driver to test real method
-        from RNS.Interfaces import linux_bluetooth_driver
+        from ble_reticulum import linux_bluetooth_driver
 
         # Create minimal driver instance
         driver = Mock()
@@ -103,7 +103,7 @@ class TestScannerConnectionCoordination:
         This test reproduces the core bug - scanner doesn't know to pause
         when connections are active.
         """
-        from RNS.Interfaces import linux_bluetooth_driver
+        from ble_reticulum import linux_bluetooth_driver
 
         driver = Mock()
         driver._connecting_peers = {"AA:BB:CC:DD:EE:FF"}
@@ -126,7 +126,7 @@ class TestScannerConnectionCoordination:
 
         PASSES AFTER FIX: Method correctly handles multiple connections
         """
-        from RNS.Interfaces import linux_bluetooth_driver
+        from ble_reticulum import linux_bluetooth_driver
 
         driver = Mock()
         driver._connecting_peers = {
@@ -156,7 +156,7 @@ class TestScannerConnectionCoordination:
         This test verifies the coordination logic is actually used in the
         scan loop. We mock BleakScanner to avoid real Bluetooth operations.
         """
-        from RNS.Interfaces import linux_bluetooth_driver
+        from ble_reticulum import linux_bluetooth_driver
 
         # Create mock driver
         driver = Mock()
@@ -196,7 +196,7 @@ class TestScannerConnectionCoordination:
 
         PASSES AFTER FIX: Scanner starts when _connecting_peers is empty
         """
-        from RNS.Interfaces import linux_bluetooth_driver
+        from ble_reticulum import linux_bluetooth_driver
 
         driver = Mock()
         driver._connecting_peers = set()  # No connections
@@ -231,7 +231,7 @@ class TestScannerConnectionCoordination:
         2. Connection completes -> peer removed from _connecting_peers
         3. Next scan loop iteration -> scanner resumes
         """
-        from RNS.Interfaces import linux_bluetooth_driver
+        from ble_reticulum import linux_bluetooth_driver
 
         driver = Mock()
         driver._connecting_peers = {"AA:BB:CC:DD:EE:FF"}
@@ -280,7 +280,7 @@ class TestScannerConnectionCoordination:
         - It correctly identifies when to pause
         - It prevents scanner.start() calls during connections
         """
-        from RNS.Interfaces import linux_bluetooth_driver
+        from ble_reticulum import linux_bluetooth_driver
 
         driver = Mock()
         driver._log = Mock()

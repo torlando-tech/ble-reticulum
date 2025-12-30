@@ -20,7 +20,7 @@ class TestConfigDirectoryResolution(unittest.TestCase):
         # Remove BLEInterface from sys.modules if it was imported
         modules_to_remove = [
             'BLEInterface',
-            'RNS.Interfaces.BLEInterface'
+            'ble_reticulum.BLEInterface'
         ]
         for module in modules_to_remove:
             if module in sys.modules:

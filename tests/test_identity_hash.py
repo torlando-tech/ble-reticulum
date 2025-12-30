@@ -107,7 +107,7 @@ class TestComputeIdentityHash:
         # Read the actual BLEInterface.py source
         ble_interface_path = os.path.join(
             os.path.dirname(__file__),
-            '../src/RNS/Interfaces/BLEInterface.py'
+            '../src/ble_reticulum/BLEInterface.py'
         )
 
         with open(ble_interface_path, 'r') as f:
