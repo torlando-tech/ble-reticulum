@@ -86,7 +86,7 @@ jobs:
       run: |
         # Run only unit tests (fragmentation and prioritization)
         python -m pytest tests/test_fragmentation.py tests/test_prioritization.py -v \
-          --cov=src/ble_reticulum/BLEFragmentation.py \
+          --cov=src/ble_reticulum \
           --cov-report=term-missing \
           --cov-report=xml:coverage-unit.xml
       continue-on-error: false
@@ -95,6 +95,7 @@ jobs:
       if: matrix.python-version == '3.11'
       uses: codecov/codecov-action@v4
       with:
+        token: ${{ secrets.CODECOV_TOKEN }}
         file: ./coverage-unit.xml
         flags: unit
         fail_ci_if_error: false
@@ -151,6 +152,7 @@ jobs:
       if: matrix.python-version == '3.11'
       uses: codecov/codecov-action@v4
       with:
+        token: ${{ secrets.CODECOV_TOKEN }}
         file: ./coverage-integration.xml
         flags: integration
         fail_ci_if_error: false
