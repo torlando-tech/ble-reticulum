@@ -80,9 +80,7 @@ jobs:
         pip install rns bleak bluezero dbus-python
 
     - name: Create package structure
-      run: |
-        
-        touch src/ble_reticulum/__init__.py
+      run: touch src/ble_reticulum/__init__.py
 
     - name: Run unit tests
       run: |
@@ -133,9 +131,7 @@ jobs:
         pip install rns bleak bluezero dbus-python
 
     - name: Create package structure
-      run: |
-        
-        touch src/ble_reticulum/__init__.py
+      run: touch src/ble_reticulum/__init__.py
 
     - name: Run integration tests
       run: |
