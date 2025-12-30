@@ -339,11 +339,15 @@ class TestAddressChangedCallback:
         assert old_mac not in ble_interface.address_to_identity
         assert old_mac not in ble_interface._identity_cache
 
-        # Patch RNS.log at module level to capture calls
-        import RNS
-        original_log = RNS.log
+        # Patch RNS.log in the BLEInterface module's namespace
+        from ble_reticulum import BLEInterface as ble_module
         log_calls = []
-        RNS.log = lambda msg, level=4: log_calls.append((msg, level))
+
+        def capture_log(msg, level=4):
+            log_calls.append((msg, level))
+
+        original_log = ble_module.RNS.log
+        ble_module.RNS.log = capture_log
 
         try:
             # Call address changed callback - should not crash
@@ -354,7 +358,7 @@ class TestAddressChangedCallback:
             assert any("no identity found" in str(msg).lower() for msg, level in log_calls), \
                 f"Expected 'no identity found' warning, got: {log_calls}"
         finally:
-            RNS.log = original_log
+            ble_module.RNS.log = original_log
 
 
 class TestCacheTTL:
