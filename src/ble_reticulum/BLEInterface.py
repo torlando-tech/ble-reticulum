@@ -67,17 +67,14 @@ except NameError:
 if _interface_dir not in sys.path:
     sys.path.insert(0, _interface_dir)
 
-# Import base Interface class
-# When integrated into Reticulum, this will be:
-# from ble_reticulum.Interface import Interface
-# For now, we'll need to handle the import path
+# Import base Interface class from Reticulum
 try:
-    from ble_reticulum.Interface import Interface
+    from RNS.Interfaces.Interface import Interface
 except ImportError:
     # Fallback for development
     import os
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../'))
-    from ble_reticulum.Interface import Interface
+    from RNS.Interfaces.Interface import Interface
 
 # Import fragmentation module
 # Note: When loaded as external interface, use absolute imports
