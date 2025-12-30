@@ -81,14 +81,14 @@ jobs:
 
     - name: Create package structure
       run: |
-        touch src/RNS/__init__.py
-        touch src/RNS/Interfaces/__init__.py
+        
+        touch src/ble_reticulum/__init__.py
 
     - name: Run unit tests
       run: |
         # Run only unit tests (fragmentation and prioritization)
         python -m pytest tests/test_fragmentation.py tests/test_prioritization.py -v \
-          --cov=src/RNS/Interfaces/BLEFragmentation.py \
+          --cov=src/ble_reticulum/BLEFragmentation.py \
           --cov-report=term-missing \
           --cov-report=xml:coverage-unit.xml
       continue-on-error: false
@@ -134,8 +134,8 @@ jobs:
 
     - name: Create package structure
       run: |
-        touch src/RNS/__init__.py
-        touch src/RNS/Interfaces/__init__.py
+        
+        touch src/ble_reticulum/__init__.py
 
     - name: Run integration tests
       run: |
@@ -145,7 +145,7 @@ jobs:
           --ignore=tests/test_v2_2_identity_handshake.py \
           --ignore=tests/test_v2_2_mac_sorting.py \
           --ignore=tests/test_v2_2_race_conditions.py \
-          --cov=src/RNS/Interfaces \
+          --cov=src/ble_reticulum \
           --cov-report=term-missing \
           --cov-report=xml:coverage-integration.xml \
           --tb=short

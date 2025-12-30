@@ -431,7 +431,7 @@ class TestImplementationValidation:
 
     def test_discovered_peer_class_exists(self):
         """Test that DiscoveredPeer class is in the source file"""
-        interface_path = os.path.join(os.path.dirname(__file__), '../src/RNS/Interfaces/BLEInterface.py')
+        interface_path = os.path.join(os.path.dirname(__file__), '../src/ble_reticulum/BLEInterface.py')
         with open(interface_path, 'r') as f:
             code = f.read()
 
@@ -444,7 +444,7 @@ class TestImplementationValidation:
 
     def test_prioritization_methods_exist(self):
         """Test that prioritization methods exist in BLEInterface.py"""
-        interface_path = os.path.join(os.path.dirname(__file__), '../src/RNS/Interfaces/BLEInterface.py')
+        interface_path = os.path.join(os.path.dirname(__file__), '../src/ble_reticulum/BLEInterface.py')
         with open(interface_path, 'r') as f:
             code = f.read()
 
@@ -458,7 +458,7 @@ class TestImplementationValidation:
 
     def test_configuration_options_exist(self):
         """Test that prioritization configuration options exist"""
-        interface_path = os.path.join(os.path.dirname(__file__), '../src/RNS/Interfaces/BLEInterface.py')
+        interface_path = os.path.join(os.path.dirname(__file__), '../src/ble_reticulum/BLEInterface.py')
         with open(interface_path, 'r') as f:
             code = f.read()
 

@@ -14,7 +14,7 @@ project_root = os.path.dirname(tests_dir)
 src_dir = os.path.join(project_root, 'src')
 
 # Add src/ to path for BLE interface modules
-# This allows tests to import from src/RNS/Interfaces/
+# This allows tests to import from src/ble_reticulum/
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
