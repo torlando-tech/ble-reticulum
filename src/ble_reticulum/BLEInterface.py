@@ -376,6 +376,10 @@ class BLEInterface(Interface):
         self.spawned_interfaces = {}  # identity_hash (16 hex chars) -> BLEPeerInterface
         self.address_to_identity = {}  # address -> peer_identity (16-byte identity)
         self.identity_to_address = {}  # identity_hash -> address (for reverse lookup)
+        # Cache for recently disconnected identities (address -> (identity, timestamp))
+        # Used to restore identity when peer reconnects before cache expiry (60s)
+        self._identity_cache = {}
+        self._identity_cache_ttl = 60  # seconds
 
         # Fragmentation
         self.fragmenters = {}  # address -> BLEFragmenter (per MTU)
@@ -410,6 +414,7 @@ class BLEInterface(Interface):
         self.driver.on_device_disconnected = self._device_disconnected_callback
         self.driver.on_error = self._error_callback
         self.driver.on_duplicate_identity_detected = self._check_duplicate_identity
+        self.driver.on_address_changed = self._address_changed_callback
 
         # Redirect Python logging to RNS logging for proper formatting
         self._setup_logging_redirect()
@@ -985,6 +990,12 @@ class BLEInterface(Interface):
         peer_identity = self.address_to_identity.get(address)
         if peer_identity:
             identity_hash = self._compute_identity_hash(peer_identity)
+
+            # Cache identity before cleanup - allows restoration if peer reconnects
+            # without a full identity handshake (e.g., Android maintains GATT connection)
+            self._identity_cache[address] = (peer_identity, time.time())
+            RNS.log(f"{self} cached identity for {address} (TTL {self._identity_cache_ttl}s)", RNS.LOG_DEBUG)
+
             if identity_hash in self.spawned_interfaces:
                 peer_if = self.spawned_interfaces[identity_hash]
                 peer_if.detach()
@@ -1053,6 +1064,66 @@ class BLEInterface(Interface):
             del self.pending_mtu[old_address]
 
         RNS.log(f"{self} cleaned up stale state for {old_address}", RNS.LOG_DEBUG)
+
+    def _address_changed_callback(self, old_address: str, new_address: str, identity_hash: str):
+        """
+        Driver callback: Handle address change during dual connection deduplication.
+
+        When the driver deduplicates a dual connection (same identity connected as both
+        central and peripheral), it closes one direction and notifies us to update
+        our address mappings.
+
+        Args:
+            old_address: The address that was closed/removed
+            new_address: The address that remains active
+            identity_hash: The 32-char hex identity hash for this peer
+        """
+        RNS.log(
+            f"{self} address changed for {identity_hash[:8]}: {old_address} -> {new_address}",
+            RNS.LOG_INFO
+        )
+
+        # Get peer identity from old address before cleanup
+        peer_identity = self.address_to_identity.get(old_address)
+        if not peer_identity:
+            # Try cache if not in active mapping
+            cached = self._identity_cache.get(old_address)
+            if cached:
+                peer_identity = cached[0]
+                del self._identity_cache[old_address]
+
+        if peer_identity:
+            # Migrate address_to_identity mapping
+            if old_address in self.address_to_identity:
+                del self.address_to_identity[old_address]
+            self.address_to_identity[new_address] = peer_identity
+
+            # Update identity_to_address to point to new address
+            computed_hash = self._compute_identity_hash(peer_identity)
+            self.identity_to_address[computed_hash] = new_address
+
+            # Migrate fragmenter/reassembler from old to new key
+            old_frag_key = self._get_fragmenter_key(peer_identity, old_address)
+            new_frag_key = self._get_fragmenter_key(peer_identity, new_address)
+            with self.frag_lock:
+                if old_frag_key in self.fragmenters:
+                    self.fragmenters[new_frag_key] = self.fragmenters.pop(old_frag_key)
+                if old_frag_key in self.reassemblers:
+                    self.reassemblers[new_frag_key] = self.reassemblers.pop(old_frag_key)
+
+            RNS.log(f"{self} migrated identity mappings from {old_address} to {new_address}", RNS.LOG_DEBUG)
+        else:
+            RNS.log(f"{self} no identity found for {old_address} during address change", RNS.LOG_WARNING)
+
+        # Clean up old address from other state
+        if old_address in self.pending_mtu:
+            mtu = self.pending_mtu.pop(old_address)
+            self.pending_mtu[new_address] = mtu
+
+        with self.peer_lock:
+            if old_address in self.peers:
+                peer_data = self.peers.pop(old_address)
+                self.peers[new_address] = peer_data
 
     def _error_callback(self, severity: str, message: str, exc: Exception = None):
         """
@@ -1520,8 +1591,28 @@ class BLEInterface(Interface):
         # Look up peer identity to compute fragmenter key
         peer_identity = self.address_to_identity.get(peer_address)
         if not peer_identity:
-            RNS.log(f"{self} no identity for peer {peer_address}, dropping data", RNS.LOG_WARNING)
-            return
+            # Try identity cache - peer may have "disconnected" from Python's view
+            # but Android/driver layer maintains the GATT connection
+            cached = self._identity_cache.get(peer_address)
+            if cached and (time.time() - cached[1]) < self._identity_cache_ttl:
+                peer_identity = cached[0]
+                # Restore identity mapping - peer is still active
+                self.address_to_identity[peer_address] = peer_identity
+                identity_hash = self._compute_identity_hash(peer_identity)
+                self.identity_to_address[identity_hash] = peer_address
+                RNS.log(f"{self} restored identity from cache for {peer_address}", RNS.LOG_DEBUG)
+                # Remove from cache since it's now active again
+                del self._identity_cache[peer_address]
+            else:
+                # Neither active mapping nor cache has identity - request resync from driver
+                # This handles the case where Android maintained connection but Python lost state
+                if hasattr(self.driver, 'request_identity_resync'):
+                    RNS.log(f"{self} requesting identity resync for {peer_address}", RNS.LOG_DEBUG)
+                    self.driver.request_identity_resync(peer_address)
+                    # Drop this packet - next one should work after resync completes
+                else:
+                    RNS.log(f"{self} no identity for peer {peer_address}, dropping data", RNS.LOG_WARNING)
+                return
 
         # Compute identity-based fragmenter key (matches peripheral data handler)
         frag_key = self._get_fragmenter_key(peer_identity, peer_address)
@@ -1577,8 +1668,18 @@ class BLEInterface(Interface):
             peer_identity = self.address_to_identity.get(peer_address, None)
 
             if not peer_identity:
-                RNS.log(f"{self} no identity for peer {peer_address}, packet dropped", RNS.LOG_WARNING)
-                return
+                # Fallback to cache (should already be restored above, but defensive)
+                cached = self._identity_cache.get(peer_address)
+                if cached and (time.time() - cached[1]) < self._identity_cache_ttl:
+                    peer_identity = cached[0]
+                    self.address_to_identity[peer_address] = peer_identity
+                    identity_hash = self._compute_identity_hash(peer_identity)
+                    self.identity_to_address[identity_hash] = peer_address
+                    del self._identity_cache[peer_address]
+                    RNS.log(f"{self} restored identity from cache for {peer_address} (reassembly)", RNS.LOG_DEBUG)
+                else:
+                    RNS.log(f"{self} no identity for peer {peer_address}, packet dropped", RNS.LOG_WARNING)
+                    return
 
             identity_hash = self._compute_identity_hash(peer_identity)
             peer_if = self.spawned_interfaces.get(identity_hash, None)
