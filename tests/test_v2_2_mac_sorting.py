@@ -59,9 +59,9 @@ if not hasattr(RNS, 'Identity'):
     RNS.Identity = MagicMock()
     RNS.Identity.full_hash = lambda x: (x * 2)[:16]
 
-# Mock RNS.Interfaces.Interface module (the base class module, not the whole namespace)
+# Mock ble_reticulum.Interface module (the base class module, not the whole namespace)
 # We only mock the Interface.py module, allowing BLEInterface.py to be imported from src/
-if 'RNS.Interfaces.Interface' not in _sys.modules:
+if 'ble_reticulum.Interface' not in _sys.modules:
     # Create mock Interface base class
     class MockInterface:
         MODE_FULL = 1
@@ -100,13 +100,13 @@ if 'RNS.Interfaces.Interface' not in _sys.modules:
                     return bool(val) if val is not None else default
             return ConfigObj(configuration)
 
-    # Create a mock module for RNS.Interfaces.Interface
+    # Create a mock module for ble_reticulum.Interface
     interface_module = MagicMock()
     interface_module.Interface = MockInterface
-    _sys.modules['RNS.Interfaces.Interface'] = interface_module
+    _sys.modules['ble_reticulum.Interface'] = interface_module
 
 from tests.mock_ble_driver import MockBLEDriver
-from RNS.Interfaces.BLEInterface import BLEInterface, DiscoveredPeer
+from ble_reticulum.BLEInterface import BLEInterface, DiscoveredPeer
 import time
 
 

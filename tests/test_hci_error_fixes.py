@@ -56,7 +56,7 @@ class TestEventDrivenDBusMonitor:
     @pytest.fixture
     def mock_gatt_server(self, mock_driver):
         """Create mock GATT server with event-driven monitoring setup."""
-        from RNS.Interfaces.linux_bluetooth_driver import BluezeroGATTServer
+        from ble_reticulum.linux_bluetooth_driver import BluezeroGATTServer
 
         server = Mock(spec=BluezeroGATTServer)
         server.driver = mock_driver

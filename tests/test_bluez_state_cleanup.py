@@ -220,7 +220,7 @@ class TestRemoveBlueZDeviceMethod:
     @pytest.mark.asyncio
     async def test_requires_dbus(self):
         """Test that method returns False when D-Bus is not available."""
-        from RNS.Interfaces import linux_bluetooth_driver
+        from ble_reticulum import linux_bluetooth_driver
 
         # Mock HAS_DBUS to False
         with patch.object(linux_bluetooth_driver, 'HAS_DBUS', False):

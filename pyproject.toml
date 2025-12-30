@@ -58,11 +58,11 @@ Repository = "https://github.com/torlando-tech/ble-reticulum"
 Issues = "https://github.com/torlando-tech/ble-reticulum/issues"
 
 [tool.setuptools]
-packages = ["RNS.Interfaces"]
+packages = ["ble_reticulum"]
 package-dir = {"" = "src"}
 
 [tool.setuptools.package-data]
-"RNS.Interfaces" = ["*.py"]
+"ble_reticulum" = ["*.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

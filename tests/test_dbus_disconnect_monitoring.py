@@ -56,7 +56,7 @@ class TestDBusDisconnectMonitoring:
     @pytest.fixture
     def mock_gatt_server(self, mock_driver):
         """Create mock GATT server with monitoring setup."""
-        from RNS.Interfaces.linux_bluetooth_driver import BluezeroGATTServer
+        from ble_reticulum.linux_bluetooth_driver import BluezeroGATTServer
 
         server = Mock(spec=BluezeroGATTServer)
         server.driver = mock_driver
@@ -304,7 +304,7 @@ class TestDBusDisconnectMonitoring:
 
     def test_error_handling_no_dbus(self, mock_gatt_server):
         """Test that monitoring returns early when D-Bus is not available."""
-        with patch('RNS.Interfaces.linux_bluetooth_driver.HAS_DBUS', False):
+        with patch('ble_reticulum.linux_bluetooth_driver.HAS_DBUS', False):
             # Simulate the early return logic
             HAS_DBUS = False
 

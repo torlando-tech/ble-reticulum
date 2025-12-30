@@ -28,7 +28,7 @@ def test_interface_has_gatt_integration():
         code = f.read()
 
     # Check for driver-based architecture
-    assert 'from RNS.Interfaces.bluetooth_driver import BLEDriverInterface' in code or 'bluetooth_driver' in code
+    assert 'from ble_reticulum.bluetooth_driver import BLEDriverInterface' in code or 'bluetooth_driver' in code
 
     # Check for peripheral mode configuration
     assert 'enable_peripheral' in code

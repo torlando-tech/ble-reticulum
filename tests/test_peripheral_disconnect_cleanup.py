@@ -456,7 +456,7 @@ class TestRealWorldScenario:
         Verifies that cleanup is idempotent - if both mechanisms detect the same
         disconnect, cleanup should only happen once without errors.
         """
-        from RNS.Interfaces.linux_bluetooth_driver import BluezeroGATTServer
+        from ble_reticulum.linux_bluetooth_driver import BluezeroGATTServer
 
         # Setup GATT server with monitoring
         server = Mock(spec=BluezeroGATTServer)
@@ -502,7 +502,7 @@ class TestRealWorldScenario:
         Simulates scenario where D-Bus signal fails or is delayed, but polling
         fallback detects and triggers cleanup within 30 seconds.
         """
-        from RNS.Interfaces.linux_bluetooth_driver import BluezeroGATTServer
+        from ble_reticulum.linux_bluetooth_driver import BluezeroGATTServer
 
         # Setup GATT server
         server = Mock(spec=BluezeroGATTServer)

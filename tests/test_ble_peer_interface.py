@@ -12,7 +12,7 @@ from unittest.mock import Mock, AsyncMock, patch, MagicMock
 
 # Import fragmentation for testing
 try:
-    from RNS.Interfaces.BLEFragmentation import BLEFragmenter, BLEReassembler
+    from ble_reticulum.BLEFragmentation import BLEFragmenter, BLEReassembler
 except ImportError:
     BLEFragmenter = None
     BLEReassembler = None

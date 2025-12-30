@@ -36,7 +36,7 @@ try:
     HAS_BLE_AGENT = True
 except ImportError:
     try:
-        from RNS.Interfaces.BLEAgent import register_agent, unregister_agent
+        from ble_reticulum.BLEAgent import register_agent, unregister_agent
         HAS_BLE_AGENT = True
     except ImportError:
         HAS_BLE_AGENT = False

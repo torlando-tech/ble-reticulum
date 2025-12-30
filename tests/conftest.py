@@ -237,7 +237,7 @@ def sample_configuration():
 def sample_discovered_peers():
     """Sample DiscoveredPeer objects for testing."""
     try:
-        from RNS.Interfaces.BLEInterface import DiscoveredPeer
+        from ble_reticulum.BLEInterface import DiscoveredPeer
     except ImportError:
         # Create a simple mock DiscoveredPeer for testing
         import time
