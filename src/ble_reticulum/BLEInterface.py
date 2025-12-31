@@ -376,6 +376,7 @@ class BLEInterface(Interface):
         self.spawned_interfaces = {}  # identity_hash (16 hex chars) -> BLEPeerInterface
         self.address_to_identity = {}  # address -> peer_identity (16-byte identity)
         self.identity_to_address = {}  # identity_hash -> address (for reverse lookup)
+        self.address_to_interface = {}  # address -> BLEPeerInterface (for cleanup fallback)
         # Cache for recently disconnected identities (address -> (identity, timestamp))
         # Used to restore identity when peer reconnects before cache expiry (60s)
         self._identity_cache = {}
@@ -681,12 +682,13 @@ class BLEInterface(Interface):
 
     def _periodic_cleanup_task(self):
         """
-        Periodically clean up stale reassembly buffers (CRITICAL #2: prevent memory leak)
+        Periodically clean up stale reassembly buffers and orphaned interfaces.
 
-        This task runs every 30 seconds to remove incomplete packet reassembly buffers
-        that have timed out. Without this, failed transmissions would leave buffers in
-        memory indefinitely, leading to memory exhaustion on long-running instances
-        (especially critical on Pi Zero with only 512MB RAM).
+        This task runs every 30 seconds to:
+        1. Remove incomplete packet reassembly buffers that have timed out
+           (prevents memory exhaustion on long-running instances)
+        2. Validate spawned interfaces against actual connections
+           (catches orphaned interfaces from race conditions)
         """
         if not self.online:
             return  # Don't reschedule if interface is offline
@@ -704,8 +706,69 @@ class BLEInterface(Interface):
                 RNS.log(f"{self} periodic cleanup: removed {total_cleaned} stale reassembly buffer(s) total",
                            RNS.LOG_INFO)
 
+        # Validate spawned interfaces against actual connections
+        self._validate_spawned_interfaces()
+
         # Reschedule for next cleanup cycle
         self._start_cleanup_timer()
+
+    def _validate_spawned_interfaces(self):
+        """
+        Validate that all spawned interfaces have actual underlying connections.
+
+        Cleans up orphaned interfaces where the BLE connection is gone but the
+        interface remains (race condition protection). This is a safety net for
+        cases where cleanup in disconnect callbacks fails due to timing issues.
+        """
+        try:
+            # Get list of actually connected peers from driver
+            connected_addresses = set(self.driver.connected_peers)
+
+            # Check all address_to_interface entries
+            orphaned = []
+            for address, peer_if in list(self.address_to_interface.items()):
+                if address not in connected_addresses:
+                    # Connection is gone but interface remains
+                    orphaned.append((address, peer_if))
+
+            # Clean up orphaned interfaces
+            for address, peer_if in orphaned:
+                RNS.log(f"{self} cleaning up orphaned interface for {address} (no active connection)", RNS.LOG_WARNING)
+
+                # Get identity info from interface
+                peer_identity = None
+                identity_hash = None
+                if peer_if.peer_identity:
+                    peer_identity = peer_if.peer_identity
+                    identity_hash = self._compute_identity_hash(peer_identity)
+
+                # Detach the interface
+                peer_if.detach()
+
+                # Remove from all tracking dicts
+                if address in self.address_to_interface:
+                    del self.address_to_interface[address]
+                if identity_hash and identity_hash in self.spawned_interfaces:
+                    del self.spawned_interfaces[identity_hash]
+                if address in self.address_to_identity:
+                    del self.address_to_identity[address]
+                if identity_hash and identity_hash in self.identity_to_address:
+                    del self.identity_to_address[identity_hash]
+
+                # Clean up fragmentation state
+                if peer_identity:
+                    frag_key = self._get_fragmenter_key(peer_identity, address)
+                    with self.frag_lock:
+                        if frag_key in self.fragmenters:
+                            del self.fragmenters[frag_key]
+                        if frag_key in self.reassemblers:
+                            del self.reassemblers[frag_key]
+
+            if orphaned:
+                RNS.log(f"{self} periodic validation: cleaned up {len(orphaned)} orphaned interface(s)", RNS.LOG_INFO)
+
+        except Exception as e:
+            RNS.log(f"{self} error during interface validation (non-fatal): {e}", RNS.LOG_WARNING)
 
     def _device_discovered_callback(self, device: BLEDevice):
         """
@@ -978,6 +1041,8 @@ class BLEInterface(Interface):
         Driver callback: Handle device disconnection.
 
         Cleans up peer state, interfaces, and fragmentation buffers.
+        Uses dual-index approach: tries identity lookup first, falls back to
+        address_to_interface for reliable cleanup even when identity unavailable.
         """
         RNS.log(f"{self} disconnected from {address}", RNS.LOG_INFO)
 
@@ -986,8 +1051,11 @@ class BLEInterface(Interface):
             if address in self.peers:
                 del self.peers[address]
 
-        # Detach interface
+        # Try identity-based lookup first
         peer_identity = self.address_to_identity.get(address)
+        peer_if = None
+        identity_hash = None
+
         if peer_identity:
             identity_hash = self._compute_identity_hash(peer_identity)
 
@@ -996,19 +1064,41 @@ class BLEInterface(Interface):
             self._identity_cache[address] = (peer_identity, time.time())
             RNS.log(f"{self} cached identity for {address} (TTL {self._identity_cache_ttl}s)", RNS.LOG_DEBUG)
 
-            if identity_hash in self.spawned_interfaces:
-                peer_if = self.spawned_interfaces[identity_hash]
-                peer_if.detach()
-                del self.spawned_interfaces[identity_hash]
-                RNS.log(f"{self} detached interface for {address}", RNS.LOG_DEBUG)
+            # Get interface via identity
+            peer_if = self.spawned_interfaces.get(identity_hash)
 
-            # Clean up identity mappings to prevent stale connections
-            if address in self.address_to_identity:
-                del self.address_to_identity[address]
-                RNS.log(f"{self} cleaned up address_to_identity for {address}", RNS.LOG_DEBUG)
-            if identity_hash in self.identity_to_address:
-                del self.identity_to_address[identity_hash]
-                RNS.log(f"{self} cleaned up identity_to_address for {identity_hash}", RNS.LOG_DEBUG)
+        # Fallback: if no identity or interface not found via identity, try direct address lookup
+        if peer_if is None:
+            peer_if = self.address_to_interface.get(address)
+            if peer_if:
+                RNS.log(f"{self} using address-based fallback for cleanup of {address}", RNS.LOG_DEBUG)
+                # Get identity from the interface itself
+                if peer_if.peer_identity:
+                    peer_identity = peer_if.peer_identity
+                    identity_hash = self._compute_identity_hash(peer_identity)
+
+        # Detach interface if found
+        if peer_if:
+            peer_if.detach()
+            RNS.log(f"{self} detached interface for {address}", RNS.LOG_DEBUG)
+
+            # Clean up spawned_interfaces dict
+            if identity_hash and identity_hash in self.spawned_interfaces:
+                del self.spawned_interfaces[identity_hash]
+        else:
+            RNS.log(f"{self} no interface found for disconnected {address} (may have been cleaned already)", RNS.LOG_DEBUG)
+
+        # Always clean up address_to_interface mapping
+        if address in self.address_to_interface:
+            del self.address_to_interface[address]
+
+        # Clean up identity mappings
+        if address in self.address_to_identity:
+            del self.address_to_identity[address]
+            RNS.log(f"{self} cleaned up address_to_identity for {address}", RNS.LOG_DEBUG)
+        if identity_hash and identity_hash in self.identity_to_address:
+            del self.identity_to_address[identity_hash]
+            RNS.log(f"{self} cleaned up identity_to_address for {identity_hash}", RNS.LOG_DEBUG)
 
         # Clean up fragmenter/reassembler
         if peer_identity:
@@ -1049,6 +1139,8 @@ class BLEInterface(Interface):
             del self.identity_to_address[identity_hash]
         if old_address in self.address_to_identity:
             del self.address_to_identity[old_address]
+        if old_address in self.address_to_interface:
+            del self.address_to_interface[old_address]
 
         # Clean up fragmenter/reassembler for old address
         if peer_identity:
@@ -1101,6 +1193,11 @@ class BLEInterface(Interface):
             # Update identity_to_address to point to new address
             computed_hash = self._compute_identity_hash(peer_identity)
             self.identity_to_address[computed_hash] = new_address
+
+            # Migrate address_to_interface mapping
+            if old_address in self.address_to_interface:
+                interface = self.address_to_interface.pop(old_address)
+                self.address_to_interface[new_address] = interface
 
             # Migrate fragmenter/reassembler from old to new key
             old_frag_key = self._get_fragmenter_key(peer_identity, old_address)
@@ -1548,10 +1645,13 @@ class BLEInterface(Interface):
         # Compute lookup key using identity hash
         identity_hash = self._compute_identity_hash(peer_identity)
 
-        # Check if interface already exists (MAC sorting should prevent this)
+        # Check if interface already exists (MAC rotation causes same identity at different addresses)
         if identity_hash in self.spawned_interfaces:
-            RNS.log(f"{self} interface already exists for {name} ({identity_hash[:8]}), reusing", RNS.LOG_WARNING)
-            return self.spawned_interfaces[identity_hash]
+            existing_if = self.spawned_interfaces[identity_hash]
+            # Update address_to_interface for the new address (critical for cleanup)
+            self.address_to_interface[address] = existing_if
+            RNS.log(f"{self} interface already exists for {name} ({identity_hash[:8]}), reusing (added address mapping for {address})", RNS.LOG_DEBUG)
+            return existing_if
 
         # Create new peer interface
         peer_if = BLEPeerInterface(self, address, name, peer_identity)
@@ -1565,8 +1665,9 @@ class BLEInterface(Interface):
         # Register with transport
         RNS.Transport.interfaces.append(peer_if)
 
-        # Store in tracking dict
+        # Store in tracking dicts (dual-indexed for reliable cleanup)
         self.spawned_interfaces[identity_hash] = peer_if
+        self.address_to_interface[address] = peer_if
 
         RNS.log(f"{self} created peer interface for {name} ({identity_hash[:8]}), type={connection_type}", RNS.LOG_INFO)
 
@@ -1830,35 +1931,58 @@ class BLEInterface(Interface):
         """
         Handle a central device disconnecting from our GATT server.
 
+        Uses dual-index approach: tries identity lookup first, falls back to
+        address_to_interface for reliable cleanup even when identity unavailable.
+
         Args:
             address: BLE address of the central device
         """
         RNS.log(f"{self} central disconnected: {address}", RNS.LOG_INFO)
 
-        # Look up peer identity
+        # Try identity-based lookup first
         peer_identity = self.address_to_identity.get(address, None)
+        peer_if = None
+        identity_hash = None
 
-        if not peer_identity:
-            RNS.log(f"{self} no identity for disconnected central {address}", RNS.LOG_WARNING)
-            return
+        if peer_identity:
+            identity_hash = self._compute_identity_hash(peer_identity)
+            peer_if = self.spawned_interfaces.get(identity_hash)
 
-        # Find and detach interface
-        identity_hash = self._compute_identity_hash(peer_identity)
-        if identity_hash in self.spawned_interfaces:
-            peer_if = self.spawned_interfaces[identity_hash]
+        # Fallback: if no identity or interface not found via identity, try direct address lookup
+        if peer_if is None:
+            peer_if = self.address_to_interface.get(address)
+            if peer_if:
+                RNS.log(f"{self} using address-based fallback for cleanup of central {address}", RNS.LOG_DEBUG)
+                # Get identity from the interface itself
+                if peer_if.peer_identity:
+                    peer_identity = peer_if.peer_identity
+                    identity_hash = self._compute_identity_hash(peer_identity)
+
+        # Detach interface if found
+        if peer_if:
             peer_if.detach()
-            del self.spawned_interfaces[identity_hash]
             RNS.log(f"{self} detached interface for {address}", RNS.LOG_DEBUG)
 
-            # Clean up identity mappings to prevent stale connections
-            if address in self.address_to_identity:
-                del self.address_to_identity[address]
-                RNS.log(f"{self} cleaned up address_to_identity for {address}", RNS.LOG_DEBUG)
-            if identity_hash in self.identity_to_address:
-                del self.identity_to_address[identity_hash]
-                RNS.log(f"{self} cleaned up identity_to_address for {identity_hash}", RNS.LOG_DEBUG)
+            # Clean up spawned_interfaces dict
+            if identity_hash and identity_hash in self.spawned_interfaces:
+                del self.spawned_interfaces[identity_hash]
+        else:
+            RNS.log(f"{self} no interface found for disconnected central {address} (may have been cleaned already)", RNS.LOG_DEBUG)
 
-            # Clean up fragmenter/reassembler
+        # Always clean up address_to_interface mapping
+        if address in self.address_to_interface:
+            del self.address_to_interface[address]
+
+        # Clean up identity mappings
+        if address in self.address_to_identity:
+            del self.address_to_identity[address]
+            RNS.log(f"{self} cleaned up address_to_identity for {address}", RNS.LOG_DEBUG)
+        if identity_hash and identity_hash in self.identity_to_address:
+            del self.identity_to_address[identity_hash]
+            RNS.log(f"{self} cleaned up identity_to_address for {identity_hash}", RNS.LOG_DEBUG)
+
+        # Clean up fragmenter/reassembler
+        if peer_identity:
             frag_key = self._get_fragmenter_key(peer_identity, address)
             with self.frag_lock:
                 if frag_key in self.reassemblers:
@@ -1926,6 +2050,7 @@ class BLEInterface(Interface):
         for peer_if in list(self.spawned_interfaces.values()):
             peer_if.detach()
         self.spawned_interfaces.clear()
+        self.address_to_interface.clear()
 
         # Clear fragmentation state
         with self.frag_lock:
