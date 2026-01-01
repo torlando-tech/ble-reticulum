@@ -382,6 +382,11 @@ class BLEInterface(Interface):
         self._identity_cache = {}
         self._identity_cache_ttl = 60  # seconds
 
+        # Pending connections awaiting identity handshake (address -> timestamp)
+        # If identity not received within timeout, connection is closed
+        self._pending_identity_connections = {}
+        self._pending_identity_timeout = 30  # seconds
+
         # Fragmentation
         self.fragmenters = {}  # address -> BLEFragmenter (per MTU)
         self.reassemblers = {}  # address -> BLEReassembler
@@ -679,6 +684,7 @@ class BLEInterface(Interface):
         self.cleanup_timer = threading.Timer(30.0, self._periodic_cleanup_task)
         self.cleanup_timer.daemon = True
         self.cleanup_timer.start()
+        RNS.log(f"{self} cleanup timer started (30s interval)", RNS.LOG_DEBUG)
 
     def _periodic_cleanup_task(self):
         """
@@ -692,6 +698,8 @@ class BLEInterface(Interface):
         """
         if not self.online:
             return  # Don't reschedule if interface is offline
+
+        RNS.log(f"{self} periodic cleanup running, pending identity connections: {len(self._pending_identity_connections)}", RNS.LOG_DEBUG)
 
         with self.frag_lock:
             total_cleaned = 0
@@ -709,8 +717,41 @@ class BLEInterface(Interface):
         # Validate spawned interfaces against actual connections
         self._validate_spawned_interfaces()
 
+        # Check for pending connections that never received identity (timeout)
+        self._cleanup_pending_identity_connections()
+
         # Reschedule for next cleanup cycle
         self._start_cleanup_timer()
+
+    def _cleanup_pending_identity_connections(self):
+        """
+        Disconnect connections that never completed identity handshake.
+
+        This handles cases like non-Reticulum BLE devices (AirTags, scanners)
+        that connect to our GATT server but never send the identity handshake.
+        These connections are tracked when established and disconnected if
+        identity is not received within the timeout period.
+        """
+        now = time.time()
+        timed_out = []
+
+        for address, connect_time in list(self._pending_identity_connections.items()):
+            elapsed = now - connect_time
+            if elapsed > self._pending_identity_timeout:
+                timed_out.append(address)
+                RNS.log(
+                    f"{self} connection from {address} timed out waiting for identity "
+                    f"({elapsed:.1f}s > {self._pending_identity_timeout}s), disconnecting",
+                    RNS.LOG_WARNING
+                )
+
+        # Disconnect timed-out connections
+        for address in timed_out:
+            del self._pending_identity_connections[address]
+            try:
+                self.driver.disconnect(address)
+            except Exception as e:
+                RNS.log(f"{self} error disconnecting timed-out connection {address}: {e}", RNS.LOG_ERROR)
 
     def _validate_spawned_interfaces(self):
         """
@@ -849,6 +890,10 @@ class BLEInterface(Interface):
                 RNS.log(f"{self} connected to {address} as {role_str}, received identity: {identity_hash}", RNS.LOG_INFO)
                 self._record_connection_success(address)
 
+                # Remove from pending identity tracking if it was tracked
+                if address in self._pending_identity_connections:
+                    del self._pending_identity_connections[address]
+
                 # Check for pending MTU (race condition: MTU negotiated before identity)
                 if address in self.pending_mtu:
                     pending_mtu = self.pending_mtu.pop(address)
@@ -862,11 +907,15 @@ class BLEInterface(Interface):
         elif role == "peripheral":
             # Peripheral mode: identity will arrive via handshake
             RNS.log(f"{self} connected to {address} as PERIPHERAL, waiting for identity handshake...", RNS.LOG_INFO)
+            # Track pending connection - will timeout if identity never arrives
+            self._pending_identity_connections[address] = time.time()
             # The identity will be received in `_data_received_callback`
 
         else:
-            RNS.log(f"{self} connected to {address}, but identity not provided and role is {role}. Disconnecting.", RNS.LOG_WARNING)
-            self.driver.disconnect(address)
+            # Connection without identity from non-peripheral role
+            # Track as pending - could be a device that connects but never handshakes
+            RNS.log(f"{self} connected to {address} (role={role}) without identity, tracking for timeout", RNS.LOG_INFO)
+            self._pending_identity_connections[address] = time.time()
 
     def _check_duplicate_identity(self, address: str, peer_identity: bytes) -> bool:
         """
@@ -1016,6 +1065,11 @@ class BLEInterface(Interface):
                 )
 
             RNS.log(f"{self} identity handshake complete for {address}", RNS.LOG_INFO)
+
+            # Remove from pending identity tracking (no longer waiting for handshake)
+            if address in self._pending_identity_connections:
+                del self._pending_identity_connections[address]
+
             return True  # Handshake processed successfully
 
         except Exception as e:
