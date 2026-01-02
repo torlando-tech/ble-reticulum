@@ -785,6 +785,7 @@ class BLEInterface(Interface):
 
                 if has_connected_address:
                     # New connection arrived during grace period - cancel detach
+                    del self._pending_detach[identity_hash]
                     RNS.log(f"{self} cancelled detach for {identity_hash[:8]} - address reconnected during grace period", RNS.LOG_DEBUG)
                 else:
                     # No connections - safe to detach
