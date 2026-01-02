@@ -85,8 +85,11 @@ def ble_interface(mock_rns, mock_driver):
         interface.spawned_interfaces = {}
         interface.address_to_identity = {}
         interface.identity_to_address = {}
+        interface.address_to_interface = {}  # address -> BLEPeerInterface
         interface._identity_cache = {}
         interface._identity_cache_ttl = 60
+        interface._pending_detach = {}  # identity_hash -> timestamp
+        interface._pending_detach_grace_period = 2.0  # seconds
 
         # Fragmentation
         interface.fragmenters = {}
@@ -143,12 +146,16 @@ class TestIdentityCacheOnDisconnect:
         assert cached_identity == identity
         assert time.time() - cached_time < 2  # Cached recently
 
-        # Assert: Active mappings should be cleaned up
+        # Assert: Address-specific mappings should be cleaned up immediately
         assert mac not in ble_interface.address_to_identity
-        assert identity_hash not in ble_interface.identity_to_address
 
-        # Assert: Peer interface was detached
-        mock_peer_if.detach.assert_called_once()
+        # Assert: identity_to_address and interface are NOT cleaned up immediately
+        # (grace period allows reconnection with same identity at new address)
+        assert identity_hash in ble_interface.identity_to_address
+
+        # Assert: Detach is scheduled, not immediate
+        assert identity_hash in ble_interface._pending_detach
+        mock_peer_if.detach.assert_not_called()
 
     def test_disconnect_unknown_address_no_crash(self, ble_interface, mock_rns):
         """

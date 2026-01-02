@@ -360,7 +360,7 @@ class TestMACRotationBypassesSorting:
     list regardless of MAC sorting. Previously, the code fell through to the MAC
     sorting check which could skip the peer if local MAC > peer MAC.
 
-    Fix: After _cleanup_stale_interface(), immediately add peer and continue,
+    Fix: After _cleanup_stale_address(), immediately add peer and continue,
     bypassing the MAC sorting check.
     """
 
@@ -419,7 +419,7 @@ class TestMACRotationBypassesSorting:
             "MAC rotation should bypass MAC sorting and add peer"
 
     def test_mac_rotation_cleanup_is_called(self):
-        """Test that _cleanup_stale_interface is called during MAC rotation."""
+        """Test that _cleanup_stale_address is called during MAC rotation."""
         driver = MockBLEDriver(local_address="FF:FF:FF:FF:FF:FF")
         owner = MockOwner()
 
@@ -430,13 +430,13 @@ class TestMACRotationBypassesSorting:
 
         # Track cleanup calls
         cleanup_calls = []
-        original_cleanup = interface._cleanup_stale_interface
+        original_cleanup = interface._cleanup_stale_address
 
         def tracked_cleanup(identity_hash, old_address):
             cleanup_calls.append((identity_hash, old_address))
             return original_cleanup(identity_hash, old_address)
 
-        interface._cleanup_stale_interface = tracked_cleanup
+        interface._cleanup_stale_address = tracked_cleanup
 
         # Set up MAC rotation scenario
         old_address = "AA:AA:AA:AA:AA:AA"

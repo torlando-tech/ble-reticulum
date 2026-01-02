@@ -41,7 +41,7 @@ if src_path not in sys.path:
 # Import directly using importlib to bypass RNS namespace conflicts
 # This avoids issues when a real RNS package is installed globally
 import importlib.util
-bluetooth_driver_path = os.path.join(src_path, 'RNS', 'Interfaces', 'bluetooth_driver.py')
+bluetooth_driver_path = os.path.join(src_path, 'ble_reticulum', 'bluetooth_driver.py')
 spec = importlib.util.spec_from_file_location("bluetooth_driver", bluetooth_driver_path)
 bluetooth_driver = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bluetooth_driver)
