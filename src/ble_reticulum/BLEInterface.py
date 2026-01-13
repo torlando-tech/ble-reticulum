@@ -1096,6 +1096,14 @@ class BLEInterface(Interface):
                 mtu=mtu,
                 connection_type=connection_type
             )
+        else:
+            # Interface already exists - update address mapping for MAC rotation
+            existing_if = self.spawned_interfaces[identity_hash]
+            old_addr = existing_if.peer_address
+            if old_addr != address:
+                existing_if.peer_address = address
+                self.address_to_interface[address] = existing_if
+                RNS.log(f"{self} updated peer interface address for MAC rotation: {old_addr} -> {address}", RNS.LOG_DEBUG)
 
     def _handle_identity_handshake(self, address: str, data: bytes) -> bool:
         """
@@ -1156,6 +1164,14 @@ class BLEInterface(Interface):
                     mtu=mtu,
                     connection_type=connection_type
                 )
+            else:
+                # Interface already exists - update address mapping for MAC rotation
+                existing_if = self.spawned_interfaces[identity_hash]
+                old_addr = existing_if.peer_address
+                if old_addr != address:
+                    existing_if.peer_address = address
+                    self.address_to_interface[address] = existing_if
+                    RNS.log(f"{self} updated peer interface address for MAC rotation: {old_addr} -> {address}", RNS.LOG_DEBUG)
 
             RNS.log(f"{self} identity handshake complete for {address}", RNS.LOG_INFO)
 
@@ -1340,6 +1356,9 @@ class BLEInterface(Interface):
             if old_address in self.address_to_interface:
                 interface = self.address_to_interface.pop(old_address)
                 self.address_to_interface[new_address] = interface
+                # CRITICAL: Update the interface's peer_address so send() uses correct address
+                interface.peer_address = new_address
+                RNS.log(f"{self} updated peer interface address for MAC rotation: {old_address} -> {new_address}", RNS.LOG_DEBUG)
 
             # Migrate fragmenter/reassembler from old to new key
             old_frag_key = self._get_fragmenter_key(peer_identity, old_address)
@@ -1798,6 +1817,11 @@ class BLEInterface(Interface):
                 self.address_to_interface[address] = existing_if
                 self.address_to_identity[address] = peer_identity
                 self.identity_to_address[identity_hash] = address
+                # CRITICAL: Update the interface's peer_address so send() uses correct address
+                old_addr = existing_if.peer_address
+                if old_addr != address:
+                    existing_if.peer_address = address
+                    RNS.log(f"{self} updated peer interface address for MAC rotation: {old_addr} -> {address}", RNS.LOG_DEBUG)
                 # Cancel any pending detach for this identity - new connection arrived
                 if identity_hash in self._pending_detach:
                     del self._pending_detach[identity_hash]
