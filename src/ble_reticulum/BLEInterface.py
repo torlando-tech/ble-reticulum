@@ -1779,11 +1779,18 @@ class BLEInterface(Interface):
         """
         Convert 16-byte identity to 16-character hex string for interface tracking.
 
+        Uses truncated 64-bit hash for map keys (spawned_interfaces, identity_to_address).
+        Collision risk: birthday problem collision at ~2^32 (~4 billion) identities.
+        For BLE mesh networks with <100 simultaneous peers, this is astronomically safe.
+
+        Note: Fragmenter keys use full 32-char hex via _get_fragmenter_key() for
+        maximum precision in packet reassembly.
+
         Args:
             peer_identity: 16-byte peer identity (already a hash from BLE handshake)
 
         Returns:
-            str: First 16 hex chars of identity (8 bytes)
+            str: First 16 hex chars of identity (8 bytes = 64 bits)
         """
         # peer_identity is already the identity hash from BLE handshake
         # Just convert to hex, don't re-hash (that would corrupt the identity!)
