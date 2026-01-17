@@ -1134,6 +1134,20 @@ class BLEInterface(Interface):
             central_identity = bytes(data)
             identity_hash = self._compute_identity_hash(central_identity)
 
+            # Check for duplicate identity (same identity already connected at different MAC)
+            # This prevents duplicate connections during MAC rotation overlap
+            if self._check_duplicate_identity(address, central_identity):
+                RNS.log(
+                    f"{self} duplicate identity rejected for {address} in peripheral mode (MAC rotation)",
+                    RNS.LOG_WARNING
+                )
+                # Disconnect this connection - it's a duplicate
+                try:
+                    self.driver.disconnect(address)
+                except Exception as e:
+                    RNS.log(f"{self} failed to disconnect duplicate {address}: {e}", RNS.LOG_DEBUG)
+                return True  # Consumed the handshake, rejected connection
+
             self.address_to_identity[address] = central_identity
             self.identity_to_address[identity_hash] = address
 
