@@ -392,6 +392,13 @@ class BLEInterface(Interface):
         self._pending_detach = {}
         self._pending_detach_grace_period = 2.0  # seconds
 
+        # Zombie connection detection (identity_hash -> timestamp of last real data)
+        # Connections that only exchange keepalives (no real data) for > zombie_timeout
+        # are considered "zombies" and won't block new connections from the same identity.
+        # This handles BLE link degradation where keepalives work but data doesn't.
+        self._last_real_data = {}
+        self._zombie_timeout = 30.0  # seconds - connection is zombie if no real data for this long
+
         # Fragmentation
         self.fragmenters = {}  # address -> BLEFragmenter (per MTU)
         self.reassemblers = {}  # address -> BLEReassembler
@@ -804,6 +811,9 @@ class BLEInterface(Interface):
                     del self.spawned_interfaces[identity_hash]
                 if identity_hash in self.identity_to_address:
                     del self.identity_to_address[identity_hash]
+                # Clean up zombie detection tracking
+                if identity_hash in self._last_real_data:
+                    del self._last_real_data[identity_hash]
                 # Clean up fragmenter/reassembler now that interface is fully detached
                 if peer_identity:
                     frag_key = self._get_fragmenter_key(peer_identity, "")  # Address unused in key computation
@@ -1017,13 +1027,19 @@ class BLEInterface(Interface):
         This handles Android MAC randomization where the same device advertises
         with one MAC but connects with a different MAC.
 
+        IMPORTANT: Before rejecting as duplicate, we verify that the existing
+        connection is still alive. This prevents false rejections when:
+        - A peer disconnects but identity_to_address still has a stale entry
+          (cleanup happens after a 2-second grace period)
+        - The same identity reconnects with a new MAC (Android MAC rotation)
+
         Args:
             address: MAC address attempting to connect
             peer_identity: 16-byte identity hash of the peer
 
         Returns:
             True if this identity is already connected via a different MAC (abort connection)
-            False if this is a new identity or same MAC (allow connection)
+            False if this is a new identity, same MAC, or stale entry (allow connection)
         """
         if not peer_identity or len(peer_identity) != 16:
             return False
@@ -1032,7 +1048,57 @@ class BLEInterface(Interface):
         existing_address = self.identity_to_address.get(identity_hash)
 
         if existing_address and existing_address != address:
-            # Same identity, different MAC - this is Android MAC rotation
+            # Same identity, different MAC - check if old connection is still alive
+
+            # Check 1: Is there a pending detach for this identity?
+            # If so, the old connection is already gone - allow new connection
+            if identity_hash in self._pending_detach:
+                RNS.log(
+                    f"{self} allowing reconnection from {address} - identity {identity_hash[:8]} "
+                    f"has pending detach (old connection from {existing_address} is gone)",
+                    RNS.LOG_DEBUG
+                )
+                # Clean up stale address mappings to prepare for new connection
+                self._cleanup_stale_address(identity_hash, existing_address)
+                return False
+
+            # Check 2: Is the existing address still connected?
+            # Check both driver.connected_peers and our peers dict
+            if existing_address not in self.driver.connected_peers:
+                if existing_address not in self.peers:
+                    # Old connection is dead but cleanup hasn't happened yet
+                    RNS.log(
+                        f"{self} allowing reconnection from {address} - identity {identity_hash[:8]} "
+                        f"old address {existing_address} is no longer connected",
+                        RNS.LOG_DEBUG
+                    )
+                    # Clean up stale address mappings to prepare for new connection
+                    self._cleanup_stale_address(identity_hash, existing_address)
+                    return False
+
+            # Check 3: Is the existing connection a zombie?
+            # A "zombie" connection has keepalives working but no real data for zombie_timeout.
+            # This happens when BLE link degrades - 1-byte keepalives succeed but larger
+            # data packets fail. We allow new connections to replace zombies.
+            last_data_time = self._last_real_data.get(identity_hash, 0)
+            if last_data_time > 0:
+                time_since_data = time.time() - last_data_time
+                if time_since_data > self._zombie_timeout:
+                    RNS.log(
+                        f"{self} allowing reconnection from {address} - identity {identity_hash[:8]} "
+                        f"old connection at {existing_address} is zombie (no real data for {time_since_data:.1f}s)",
+                        RNS.LOG_WARNING
+                    )
+                    # Clean up the zombie connection
+                    self._cleanup_stale_address(identity_hash, existing_address)
+                    # Disconnect the zombie to free up resources
+                    try:
+                        self.driver.disconnect(existing_address)
+                    except Exception as e:
+                        RNS.log(f"{self} failed to disconnect zombie {existing_address}: {e}", RNS.LOG_DEBUG)
+                    return False
+
+            # Existing connection is still alive and healthy - reject duplicate
             RNS.log(
                 f"{self} duplicate identity detected: {identity_hash[:8]} already connected via {existing_address}, "
                 f"rejecting connection from {address} (Android MAC rotation)",
@@ -1120,14 +1186,24 @@ class BLEInterface(Interface):
         Returns:
             True if data was handled as identity handshake, False otherwise
         """
+        # Identity handshake detection: exactly 16 bytes
+        if len(data) != 16:
+            return False  # Not a handshake
+
         # Check if we already have peer identity
         peer_identity = self.address_to_identity.get(address)
         if peer_identity:
-            return False  # Already have identity, not a handshake
-
-        # Identity handshake detection: exactly 16 bytes, no existing identity
-        if len(data) != 16:
-            return False  # Not a handshake
+            # We already have identity for this address (probably set via Kotlin callback).
+            # The 16-byte handshake data may still arrive through the data channel.
+            # Check if it matches the identity we have - if so, consume it silently.
+            if data == peer_identity:
+                RNS.log(f"{self} received duplicate identity handshake from {address} (already known via callback)", RNS.LOG_DEBUG)
+                return True  # Consume the data, don't pass to reassembler
+            else:
+                # 16 bytes but doesn't match known identity - log warning but still consume
+                # to avoid passing identity-like data to the reassembler
+                RNS.log(f"{self} received 16-byte data from {address} that differs from known identity, consuming as handshake", RNS.LOG_WARNING)
+                return True  # Consume to prevent reassembler errors
 
         try:
             # Store central's identity
@@ -1188,6 +1264,9 @@ class BLEInterface(Interface):
                     RNS.log(f"{self} updated peer interface address for MAC rotation: {old_addr} -> {address}", RNS.LOG_DEBUG)
 
             RNS.log(f"{self} identity handshake complete for {address}", RNS.LOG_INFO)
+
+            # Initialize zombie detection tracking - the 16-byte handshake counts as real data
+            self._last_real_data[identity_hash] = time.time()
 
             # Remove from pending identity tracking (no longer waiting for handshake)
             if address in self._pending_identity_connections:
@@ -1868,6 +1947,9 @@ class BLEInterface(Interface):
             self.spawned_interfaces[identity_hash] = peer_if
             self.address_to_interface[address] = peer_if
 
+            # Initialize zombie detection tracking - interface creation counts as activity
+            self._last_real_data[identity_hash] = time.time()
+
         RNS.log(f"{self} created peer interface for {name} ({identity_hash[:8]}), type={connection_type}", RNS.LOG_INFO)
 
         return peer_if
@@ -1919,6 +2001,11 @@ class BLEInterface(Interface):
                 else:
                     RNS.log(f"{self} no identity for peer {peer_address}, dropping data", RNS.LOG_WARNING)
                 return
+
+        # Track real data activity for zombie detection
+        # This proves the connection is alive and can carry actual data, not just keepalives
+        identity_hash = self._compute_identity_hash(peer_identity)
+        self._last_real_data[identity_hash] = time.time()
 
         # Compute identity-based fragmenter key (matches peripheral data handler)
         frag_key = self._get_fragmenter_key(peer_identity, peer_address)

@@ -90,6 +90,8 @@ def ble_interface(mock_rns, mock_driver):
         interface._identity_cache_ttl = 60
         interface._pending_detach = {}  # identity_hash -> timestamp
         interface._pending_detach_grace_period = 2.0  # seconds
+        interface._last_real_data = {}  # Track last real data activity for zombie detection
+        interface._zombie_timeout = 30.0  # Zombie connection timeout
 
         # Fragmentation
         interface.fragmenters = {}
