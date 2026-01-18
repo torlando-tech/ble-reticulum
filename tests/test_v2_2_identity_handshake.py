@@ -454,5 +454,110 @@ class TestReassemblerRaceCondition:
         assert identity_hash in interface.spawned_interfaces, "Central mode: interface should exist"
 
 
+class TestDuplicateIdentityHandshakeRaceCondition:
+    """
+    Test handling of duplicate identity handshake data.
+
+    When Kotlin provides the identity via callback (from reading the identity characteristic),
+    the address_to_identity mapping gets set BEFORE the 16-byte handshake data arrives
+    through _data_received_callback. The fix ensures this duplicate handshake data is
+    consumed and not passed to the reassembler where it would cause "Invalid fragment type" errors.
+    """
+
+    def test_duplicate_handshake_matching_identity_consumed(self):
+        """Test that duplicate 16-byte handshake matching known identity is consumed."""
+        driver = MockBLEDriver()
+        owner = MockOwner()
+
+        config = {"name": "Test", "enable_peripheral": True}
+        interface = BLEInterface(owner, config)
+        interface.driver = driver
+
+        central_address = "11:22:33:44:55:66"
+        central_identity = b'\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10'
+
+        # Simulate identity being set via Kotlin callback (before handshake data arrives)
+        interface.address_to_identity[central_address] = central_identity
+        identity_hash = interface._compute_identity_hash(central_identity)
+        interface.identity_to_address[identity_hash] = central_address
+
+        # Now the handshake data arrives through data channel
+        # This should be consumed (return True) and not passed to reassembler
+        result = interface._handle_identity_handshake(central_address, central_identity)
+
+        assert result is True, "Duplicate handshake matching identity should be consumed"
+        # Identity should still be the same
+        assert interface.address_to_identity[central_address] == central_identity
+
+    def test_duplicate_handshake_different_identity_still_consumed(self):
+        """Test that 16-byte data different from known identity is still consumed."""
+        driver = MockBLEDriver()
+        owner = MockOwner()
+
+        config = {"name": "Test", "enable_peripheral": True}
+        interface = BLEInterface(owner, config)
+        interface.driver = driver
+
+        central_address = "11:22:33:44:55:66"
+        known_identity = b'\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10'
+        different_16_bytes = b'\xff\xfe\xfd\xfc\xfb\xfa\xf9\xf8\xf7\xf6\xf5\xf4\xf3\xf2\xf1\xf0'
+
+        # Simulate identity being set via Kotlin callback
+        interface.address_to_identity[central_address] = known_identity
+        identity_hash = interface._compute_identity_hash(known_identity)
+        interface.identity_to_address[identity_hash] = central_address
+
+        # Different 16-byte data arrives - should still be consumed to prevent reassembler errors
+        result = interface._handle_identity_handshake(central_address, different_16_bytes)
+
+        assert result is True, "Different 16-byte data should be consumed to prevent reassembler errors"
+        # Original identity should be preserved
+        assert interface.address_to_identity[central_address] == known_identity
+
+    def test_non_16_byte_data_not_consumed_as_handshake(self):
+        """Test that non-16-byte data is not consumed as handshake even with known identity."""
+        driver = MockBLEDriver()
+        owner = MockOwner()
+
+        config = {"name": "Test", "enable_peripheral": True}
+        interface = BLEInterface(owner, config)
+        interface.driver = driver
+
+        central_address = "11:22:33:44:55:66"
+        known_identity = b'\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10'
+
+        # Set identity via callback
+        interface.address_to_identity[central_address] = known_identity
+
+        # Non-16-byte data should not be consumed as handshake
+        result_15 = interface._handle_identity_handshake(central_address, b'\x00' * 15)
+        result_17 = interface._handle_identity_handshake(central_address, b'\x00' * 17)
+        result_10 = interface._handle_identity_handshake(central_address, b'\x00' * 10)
+
+        assert result_15 is False, "15-byte data should not be consumed as handshake"
+        assert result_17 is False, "17-byte data should not be consumed as handshake"
+        assert result_10 is False, "10-byte data should not be consumed as handshake"
+
+    def test_16_byte_data_without_known_identity_processed_as_handshake(self):
+        """Test that 16-byte data without known identity is processed as new handshake."""
+        driver = MockBLEDriver()
+        owner = MockOwner()
+
+        config = {"name": "Test", "enable_peripheral": True}
+        interface = BLEInterface(owner, config)
+        interface.driver = driver
+
+        central_address = "11:22:33:44:55:66"
+        central_identity = b'\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10'
+
+        # No identity set - this should be processed as a new handshake
+        assert central_address not in interface.address_to_identity
+
+        result = interface._handle_identity_handshake(central_address, central_identity)
+
+        assert result is True, "16-byte data without known identity should be processed as handshake"
+        assert interface.address_to_identity[central_address] == central_identity
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
