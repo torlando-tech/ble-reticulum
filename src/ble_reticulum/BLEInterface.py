@@ -1186,14 +1186,24 @@ class BLEInterface(Interface):
         Returns:
             True if data was handled as identity handshake, False otherwise
         """
+        # Identity handshake detection: exactly 16 bytes
+        if len(data) != 16:
+            return False  # Not a handshake
+
         # Check if we already have peer identity
         peer_identity = self.address_to_identity.get(address)
         if peer_identity:
-            return False  # Already have identity, not a handshake
-
-        # Identity handshake detection: exactly 16 bytes, no existing identity
-        if len(data) != 16:
-            return False  # Not a handshake
+            # We already have identity for this address (probably set via Kotlin callback).
+            # The 16-byte handshake data may still arrive through the data channel.
+            # Check if it matches the identity we have - if so, consume it silently.
+            if data == peer_identity:
+                RNS.log(f"{self} received duplicate identity handshake from {address} (already known via callback)", RNS.LOG_DEBUG)
+                return True  # Consume the data, don't pass to reassembler
+            else:
+                # 16 bytes but doesn't match known identity - log warning but still consume
+                # to avoid passing identity-like data to the reassembler
+                RNS.log(f"{self} received 16-byte data from {address} that differs from known identity, consuming as handshake", RNS.LOG_WARNING)
+                return True  # Consume to prevent reassembler errors
 
         try:
             # Store central's identity
