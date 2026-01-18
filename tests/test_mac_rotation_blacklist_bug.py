@@ -29,7 +29,9 @@ It's an intentional rejection, not a failure.
 import pytest
 import time
 import re
-from unittest.mock import Mock, MagicMock, patch
+import asyncio
+import threading
+from unittest.mock import Mock, MagicMock, AsyncMock, patch
 
 
 class TestMacRotationBlacklistBug:
@@ -633,6 +635,182 @@ class TestLinuxDriverDuplicateIdentityErrorHandling:
         assert severity == "info", f"Expected 'info' severity for duplicate identity, got '{severity}'"
         assert "Duplicate identity rejected" in msg
         assert "MAC rotation" in msg
+
+
+class TestLinuxDriverDuplicateIdentityCodePath:
+    """
+    Integration tests that exercise the actual code path in linux_bluetooth_driver.py.
+
+    These tests patch BleakClient to trigger the duplicate identity exception handling
+    code in _connect_to_peer_async(), ensuring the actual driver code is covered.
+    """
+
+    @pytest.fixture
+    def driver_with_callbacks(self):
+        """Create a LinuxBluetoothDriver with minimal setup for testing."""
+        from ble_reticulum.linux_bluetooth_driver import LinuxBluetoothDriver
+
+        # Create driver instance using __new__ to skip __init__
+        driver = LinuxBluetoothDriver.__new__(LinuxBluetoothDriver)
+
+        # Set up minimal required attributes for _connect_to_peer
+        driver._log_messages = []
+        driver._connecting_peers = set()
+        driver._connecting_lock = threading.RLock()
+        driver._connected_peers = {}
+        driver._peer_roles = {}
+        driver._peers = {}
+        driver._peers_lock = threading.RLock()
+        driver._connection_timeout = 10.0
+        driver.connection_timeout = 10.0  # Property alias
+        driver._service_discovery_delay = 0.5
+        driver.service_discovery_delay = 0.5  # Property alias
+        driver.service_uuid = "37145b00-442d-4a94-917f-8f42c5da28e3"
+        driver.tx_char_uuid = "37145b00-442d-4a94-917f-8f42c5da28e4"
+        driver.rx_char_uuid = "37145b00-442d-4a94-917f-8f42c5da28e5"
+        driver.identity_char_uuid = "37145b00-442d-4a94-917f-8f42c5da28e6"
+        driver._local_identity = b'\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10'
+        driver.adapter_path = "/org/bluez/hci0"
+
+        # BlueZ version tracking (skip LE-specific connection path)
+        driver.bluez_version = None
+        driver.has_connect_device = False
+
+        # Capture log messages
+        def capture_log(msg, level="INFO"):
+            driver._log_messages.append((msg, level))
+
+        driver._log = capture_log
+
+        # Capture error callbacks
+        driver._error_callbacks = []
+
+        def capture_error(severity, message, exception):
+            driver._error_callbacks.append((severity, message, exception))
+
+        driver.on_error = capture_error
+
+        # Mock _remove_bluez_device
+        driver._remove_bluez_device = AsyncMock(return_value=True)
+
+        # Mock callbacks (not needed for this test path)
+        driver.on_device_connected = None
+        driver.on_device_disconnected = None
+        driver.on_mtu_negotiated = None
+
+        return driver
+
+    @pytest.mark.asyncio
+    async def test_duplicate_identity_exception_uses_warning_log(self, driver_with_callbacks):
+        """
+        Test that when BleakClient raises a 'Duplicate identity' exception,
+        the driver logs it as WARNING instead of ERROR.
+
+        This exercises the actual code path in linux_bluetooth_driver.py:1207-1214.
+        """
+        driver = driver_with_callbacks
+        address = "AA:BB:CC:DD:EE:FF"
+
+        # Create a mock client that raises duplicate identity exception on connect
+        mock_client = AsyncMock()
+        mock_client.is_connected = False
+        mock_client.connect = AsyncMock(
+            side_effect=Exception("Duplicate identity - already connected via different MAC (Android MAC rotation)")
+        )
+
+        # Patch BleakClient to return our mock
+        with patch('ble_reticulum.linux_bluetooth_driver.BleakClient', return_value=mock_client):
+            # Call the async connection method
+            await driver._connect_to_peer(address)
+
+        # Verify the log message uses WARNING level
+        warning_logs = [(msg, lvl) for msg, lvl in driver._log_messages if lvl == "WARNING"]
+        error_logs = [(msg, lvl) for msg, lvl in driver._log_messages if lvl == "ERROR"]
+
+        # Should have WARNING log for duplicate identity
+        assert any("Duplicate identity rejected" in msg for msg, _ in warning_logs), \
+            f"Expected WARNING log with 'Duplicate identity rejected', got warnings: {warning_logs}"
+
+        # Should NOT have ERROR log for duplicate identity
+        duplicate_errors = [msg for msg, _ in error_logs if "Duplicate identity" in msg]
+        assert len(duplicate_errors) == 0, \
+            f"Should not log duplicate identity as ERROR, got: {duplicate_errors}"
+
+    @pytest.mark.asyncio
+    async def test_duplicate_identity_exception_uses_info_severity_callback(self, driver_with_callbacks):
+        """
+        Test that when BleakClient raises a 'Duplicate identity' exception,
+        the on_error callback is called with 'info' severity, not 'error'.
+
+        This exercises the actual code path in linux_bluetooth_driver.py:1234-1238.
+        """
+        driver = driver_with_callbacks
+        address = "AA:BB:CC:DD:EE:FF"
+
+        # Create a mock client that raises duplicate identity exception on connect
+        mock_client = AsyncMock()
+        mock_client.is_connected = False
+        mock_client.connect = AsyncMock(
+            side_effect=Exception("Duplicate identity - already connected via different MAC")
+        )
+
+        # Patch BleakClient to return our mock
+        with patch('ble_reticulum.linux_bluetooth_driver.BleakClient', return_value=mock_client):
+            await driver._connect_to_peer(address)
+
+        # Verify the on_error callback was called with 'info' severity
+        assert len(driver._error_callbacks) == 1, \
+            f"Expected exactly 1 error callback, got {len(driver._error_callbacks)}"
+
+        severity, message, exception = driver._error_callbacks[0]
+
+        assert severity == "info", \
+            f"Expected 'info' severity for duplicate identity, got '{severity}'"
+
+        assert "Duplicate identity rejected" in message, \
+            f"Expected 'Duplicate identity rejected' in message, got: {message}"
+
+        assert "MAC rotation" in message, \
+            f"Expected 'MAC rotation' in message, got: {message}"
+
+    @pytest.mark.asyncio
+    async def test_normal_exception_still_uses_error_severity(self, driver_with_callbacks):
+        """
+        Test that normal (non-duplicate-identity) exceptions still use 'error' severity.
+
+        This ensures we didn't break normal error handling.
+        """
+        driver = driver_with_callbacks
+        address = "AA:BB:CC:DD:EE:FF"
+
+        # Create a mock client that raises a normal exception on connect
+        mock_client = AsyncMock()
+        mock_client.is_connected = False
+        mock_client.connect = AsyncMock(
+            side_effect=Exception("Connection refused by peer")
+        )
+        mock_client.disconnect = AsyncMock()
+
+        # Patch BleakClient to return our mock
+        with patch('ble_reticulum.linux_bluetooth_driver.BleakClient', return_value=mock_client):
+            await driver._connect_to_peer(address)
+
+        # Verify the on_error callback was called with 'error' severity
+        assert len(driver._error_callbacks) == 1, \
+            f"Expected exactly 1 error callback, got {len(driver._error_callbacks)}"
+
+        severity, message, exception = driver._error_callbacks[0]
+
+        assert severity == "error", \
+            f"Expected 'error' severity for normal failure, got '{severity}'"
+
+        assert "Connection failed to" in message, \
+            f"Expected 'Connection failed to' in message, got: {message}"
+
+        # Verify ERROR log was used
+        error_logs = [(msg, lvl) for msg, lvl in driver._log_messages if lvl == "ERROR"]
+        assert any("Connection failed to" in msg for msg, _ in error_logs), \
+            f"Expected ERROR log with 'Connection failed to', got: {error_logs}"
 
 
 if __name__ == "__main__":
