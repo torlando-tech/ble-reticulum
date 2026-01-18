@@ -53,10 +53,13 @@ class TestMacRotationBlacklistBug:
         interface.connection_retry_backoff = 60
         interface.max_connection_failures = 3
         interface.discovered_peers = {}
+        interface.peers = {}  # Track connected peers
+        interface._pending_detach = {}  # Track pending interface detachments
 
-        # Mock driver (needed for _record_connection_failure)
+        # Mock driver (needed for _record_connection_failure and connection checks)
         interface.driver = Mock()
         interface.driver._remove_bluez_device = None  # hasattr will return False
+        interface.driver.connected_peers = []  # Track driver-level connected peers
 
         # Import the actual methods we want to test
         from ble_reticulum.BLEInterface import BLEInterface as RealInterface
@@ -73,19 +76,22 @@ class TestMacRotationBlacklistBug:
         """Verify that _check_duplicate_identity returns True for duplicates."""
         interface = mock_ble_interface
 
-        # Setup: identity already connected at MAC_OLD
+        # Setup: identity already connected at MAC_OLD (with active connection)
         identity = b'\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10'
         mac_old = "AA:BB:CC:DD:EE:01"
         mac_new = "AA:BB:CC:DD:EE:02"
 
         identity_hash = interface._compute_identity_hash(identity)
         interface.identity_to_address[identity_hash] = mac_old
+        # Simulate active connection - the old MAC is still connected
+        interface.driver.connected_peers.append(mac_old)
+        interface.peers[mac_old] = {"connected": True}
 
         # Action: MAC_NEW tries to connect with same identity
         is_duplicate = interface._check_duplicate_identity(mac_new, identity)
 
-        # Assert: Should detect as duplicate
-        assert is_duplicate is True, "Should detect duplicate identity"
+        # Assert: Should detect as duplicate (old connection is still alive)
+        assert is_duplicate is True, "Should detect duplicate identity when old connection is still active"
 
     def test_blacklist_mechanism_triggers_after_3_failures(self, mock_ble_interface):
         """
@@ -376,10 +382,13 @@ class TestPeripheralModeDuplicateRejection:
         interface = MagicMock(spec=BLEInterface)
         interface.identity_to_address = {}
         interface.address_to_identity = {}
+        interface.peers = {}  # Track connected peers
+        interface._pending_detach = {}  # Track pending interface detachments
 
-        # Mock driver for disconnect calls
+        # Mock driver for disconnect calls and connection checks
         interface.driver = MagicMock()
         interface.driver.disconnect = MagicMock()
+        interface.driver.connected_peers = []  # Track driver-level connected peers
 
         # Configure __str__ for logging (MagicMock handles special methods)
         interface.__str__ = MagicMock(return_value="BLEInterface[Test]")
@@ -403,13 +412,16 @@ class TestPeripheralModeDuplicateRejection:
         """
         interface = mock_ble_interface
 
-        # Setup: identity already connected at MAC_OLD
+        # Setup: identity already connected at MAC_OLD (with active connection)
         identity = b'\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10'
         mac_old = "AA:BB:CC:DD:EE:01"
         mac_new = "AA:BB:CC:DD:EE:02"
 
         identity_hash = interface._compute_identity_hash(identity)
         interface.identity_to_address[identity_hash] = mac_old
+        # Simulate active connection - the old MAC is still connected
+        interface.driver.connected_peers.append(mac_old)
+        interface.peers[mac_old] = {"connected": True}
 
         # Check: duplicate should be detected for MAC_NEW
         is_duplicate = interface._check_duplicate_identity(mac_new, identity)
@@ -474,13 +486,16 @@ class TestPeripheralModeDuplicateRejection:
         """
         interface = mock_ble_interface
 
-        # Setup: identity already connected at MAC_OLD
+        # Setup: identity already connected at MAC_OLD (with active connection)
         identity = b'\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10'
         mac_old = "AA:BB:CC:DD:EE:01"
         mac_new = "AA:BB:CC:DD:EE:02"
 
         identity_hash = interface._compute_identity_hash(identity)
         interface.identity_to_address[identity_hash] = mac_old
+        # Simulate active connection - the old MAC is still connected
+        interface.driver.connected_peers.append(mac_old)
+        interface.peers[mac_old] = {"connected": True}
 
         # Mock the driver to track disconnect calls
         disconnect_called = []
@@ -511,13 +526,16 @@ class TestPeripheralModeDuplicateRejection:
         """
         interface = mock_ble_interface
 
-        # Setup: identity already connected at MAC_OLD
+        # Setup: identity already connected at MAC_OLD (with active connection)
         identity = b'\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10'
         mac_old = "AA:BB:CC:DD:EE:01"
         mac_new = "AA:BB:CC:DD:EE:02"
 
         identity_hash = interface._compute_identity_hash(identity)
         interface.identity_to_address[identity_hash] = mac_old
+        # Simulate active connection - the old MAC is still connected
+        interface.driver.connected_peers.append(mac_old)
+        interface.peers[mac_old] = {"connected": True}
 
         # Mock the driver to raise exception on disconnect
         def raise_on_disconnect(addr):

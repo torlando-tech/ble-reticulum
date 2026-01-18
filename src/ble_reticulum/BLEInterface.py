@@ -1017,13 +1017,19 @@ class BLEInterface(Interface):
         This handles Android MAC randomization where the same device advertises
         with one MAC but connects with a different MAC.
 
+        IMPORTANT: Before rejecting as duplicate, we verify that the existing
+        connection is still alive. This prevents false rejections when:
+        - A peer disconnects but identity_to_address still has a stale entry
+          (cleanup happens after a 2-second grace period)
+        - The same identity reconnects with a new MAC (Android MAC rotation)
+
         Args:
             address: MAC address attempting to connect
             peer_identity: 16-byte identity hash of the peer
 
         Returns:
             True if this identity is already connected via a different MAC (abort connection)
-            False if this is a new identity or same MAC (allow connection)
+            False if this is a new identity, same MAC, or stale entry (allow connection)
         """
         if not peer_identity or len(peer_identity) != 16:
             return False
@@ -1032,7 +1038,35 @@ class BLEInterface(Interface):
         existing_address = self.identity_to_address.get(identity_hash)
 
         if existing_address and existing_address != address:
-            # Same identity, different MAC - this is Android MAC rotation
+            # Same identity, different MAC - check if old connection is still alive
+
+            # Check 1: Is there a pending detach for this identity?
+            # If so, the old connection is already gone - allow new connection
+            if identity_hash in self._pending_detach:
+                RNS.log(
+                    f"{self} allowing reconnection from {address} - identity {identity_hash[:8]} "
+                    f"has pending detach (old connection from {existing_address} is gone)",
+                    RNS.LOG_DEBUG
+                )
+                # Clean up stale address mappings to prepare for new connection
+                self._cleanup_stale_address(identity_hash, existing_address)
+                return False
+
+            # Check 2: Is the existing address still connected?
+            # Check both driver.connected_peers and our peers dict
+            if existing_address not in self.driver.connected_peers:
+                if existing_address not in self.peers:
+                    # Old connection is dead but cleanup hasn't happened yet
+                    RNS.log(
+                        f"{self} allowing reconnection from {address} - identity {identity_hash[:8]} "
+                        f"old address {existing_address} is no longer connected",
+                        RNS.LOG_DEBUG
+                    )
+                    # Clean up stale address mappings to prepare for new connection
+                    self._cleanup_stale_address(identity_hash, existing_address)
+                    return False
+
+            # Existing connection is still alive - reject duplicate
             RNS.log(
                 f"{self} duplicate identity detected: {identity_hash[:8]} already connected via {existing_address}, "
                 f"rejecting connection from {address} (Android MAC rotation)",
