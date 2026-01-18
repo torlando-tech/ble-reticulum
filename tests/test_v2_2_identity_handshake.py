@@ -558,6 +558,40 @@ class TestDuplicateIdentityHandshakeRaceCondition:
         assert result is True, "16-byte data without known identity should be processed as handshake"
         assert interface.address_to_identity[central_address] == central_identity
 
+    def test_handshake_cleans_up_pending_identity_connection(self):
+        """Test that successful handshake cleans up _pending_identity_connections."""
+        from unittest.mock import Mock
+
+        driver = MockBLEDriver()
+        owner = MockOwner()
+
+        config = {"name": "Test", "enable_peripheral": True}
+        interface = BLEInterface(owner, config)
+        interface.driver = driver
+
+        # Mock get_peer_mtu which is needed during handshake processing
+        driver.get_peer_mtu = Mock(return_value=185)
+
+        central_address = "11:22:33:44:55:66"
+        central_identity = b'\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10'
+
+        # Simulate that this address was waiting for identity handshake
+        interface._pending_identity_connections[central_address] = time.time()
+
+        # Verify pending entry exists
+        assert central_address in interface._pending_identity_connections
+
+        # Process handshake
+        result = interface._handle_identity_handshake(central_address, central_identity)
+
+        # Verify handshake succeeded
+        assert result is True, "Handshake should succeed"
+        assert interface.address_to_identity[central_address] == central_identity
+
+        # Verify pending identity connection was cleaned up
+        assert central_address not in interface._pending_identity_connections, \
+            "Pending identity connection should be removed after successful handshake"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
