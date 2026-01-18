@@ -2022,7 +2022,7 @@ class BLEInterface(Interface):
             try:
                 # Store central's identity
                 central_identity = bytes(data)
-                central_identity_hash = RNS.Identity.full_hash(central_identity)[:16].hex()[:16]
+                central_identity_hash = self._compute_identity_hash(central_identity)
 
                 self.address_to_identity[sender_address] = central_identity
                 self.identity_to_address[central_identity_hash] = sender_address

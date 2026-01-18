@@ -39,7 +39,8 @@ def create_mock_peer_interface(peer_address="AA:BB:CC:DD:EE:FF", peer_name="Test
     parent.reassemblers = {peer_address: BLEReassembler() if BLEReassembler else Mock()}
     parent.frag_lock = threading.RLock()  # Use threading lock for mock
     parent.peer_lock = threading.RLock()  # Use threading lock for mock
-    parent.loop = asyncio.get_event_loop()
+    # Create a new event loop for testing (Python 3.10+ requires this)
+    parent.loop = asyncio.new_event_loop()
     parent.gatt_server = Mock()
     parent.gatt_server.send_notification = AsyncMock(return_value=True)
 
