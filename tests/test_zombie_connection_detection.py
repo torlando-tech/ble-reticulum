@@ -320,6 +320,211 @@ class TestZombieTrackingOnConnect:
             "Timestamp should be within expected range"
 
 
+class TestPendingDetachAllowsReconnection:
+    """Test that pending detach (Check 1) allows reconnection."""
+
+    @pytest.fixture
+    def mock_ble_interface(self):
+        """Create a mock BLEInterface with real method bindings."""
+        try:
+            from ble_reticulum.BLEInterface import BLEInterface
+        except ImportError:
+            pytest.skip("BLEInterface not available")
+
+        interface = Mock(spec=BLEInterface)
+        interface.identity_to_address = {}
+        interface.address_to_identity = {}
+        interface.address_to_interface = {}
+        interface.pending_mtu = {}
+        interface.fragmenters = {}
+        interface.reassemblers = {}
+        interface.frag_lock = threading.RLock()
+        interface.peers = {}
+        interface._pending_detach = {}
+        interface._last_real_data = {}
+        interface._zombie_timeout = 30.0
+        interface.driver = Mock()
+        interface.driver.connected_peers = []
+        interface.driver.disconnect = Mock()
+
+        from ble_reticulum.BLEInterface import BLEInterface as RealInterface
+
+        interface._check_duplicate_identity = lambda addr, identity: RealInterface._check_duplicate_identity(interface, addr, identity)
+        interface._compute_identity_hash = lambda identity: RealInterface._compute_identity_hash(interface, identity)
+        interface._cleanup_stale_address = lambda ih, addr: RealInterface._cleanup_stale_address(interface, ih, addr)
+        interface._get_fragmenter_key = lambda identity, addr: RealInterface._get_fragmenter_key(interface, identity, addr)
+        interface.__str__ = Mock(return_value="BLEInterface[Test]")
+
+        return interface
+
+    def test_pending_detach_allows_reconnection_from_new_mac(self, mock_ble_interface):
+        """Test that pending detach allows reconnection from new MAC (Check 1 path)."""
+        interface = mock_ble_interface
+
+        identity = b'\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10'
+        mac_old = "AA:BB:CC:DD:EE:01"
+        mac_new = "AA:BB:CC:DD:EE:02"
+
+        identity_hash = interface._compute_identity_hash(identity)
+
+        # Set up state: old connection exists in identity_to_address but has pending detach
+        interface.identity_to_address[identity_hash] = mac_old
+        interface._pending_detach[identity_hash] = time.time()  # Pending detach exists
+
+        # Note: NOT in connected_peers or peers (connection is dead)
+
+        # Should allow reconnection because pending detach exists (Check 1)
+        is_duplicate = interface._check_duplicate_identity(mac_new, identity)
+        assert not is_duplicate, "Should allow reconnection when pending detach exists"
+
+
+class TestNotConnectedAllowsReconnection:
+    """Test that not-connected check (Check 2) allows reconnection."""
+
+    @pytest.fixture
+    def mock_ble_interface(self):
+        """Create a mock BLEInterface with real method bindings."""
+        try:
+            from ble_reticulum.BLEInterface import BLEInterface
+        except ImportError:
+            pytest.skip("BLEInterface not available")
+
+        interface = Mock(spec=BLEInterface)
+        interface.identity_to_address = {}
+        interface.address_to_identity = {}
+        interface.address_to_interface = {}
+        interface.pending_mtu = {}
+        interface.fragmenters = {}
+        interface.reassemblers = {}
+        interface.frag_lock = threading.RLock()
+        interface.peers = {}
+        interface._pending_detach = {}
+        interface._last_real_data = {}
+        interface._zombie_timeout = 30.0
+        interface.driver = Mock()
+        interface.driver.connected_peers = []
+        interface.driver.disconnect = Mock()
+
+        from ble_reticulum.BLEInterface import BLEInterface as RealInterface
+
+        interface._check_duplicate_identity = lambda addr, identity: RealInterface._check_duplicate_identity(interface, addr, identity)
+        interface._compute_identity_hash = lambda identity: RealInterface._compute_identity_hash(interface, identity)
+        interface._cleanup_stale_address = lambda ih, addr: RealInterface._cleanup_stale_address(interface, ih, addr)
+        interface._get_fragmenter_key = lambda identity, addr: RealInterface._get_fragmenter_key(interface, identity, addr)
+        interface.__str__ = Mock(return_value="BLEInterface[Test]")
+
+        return interface
+
+    def test_not_connected_allows_reconnection(self, mock_ble_interface):
+        """Test that stale entry without connection allows reconnection (Check 2 path)."""
+        interface = mock_ble_interface
+
+        identity = b'\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10'
+        mac_old = "AA:BB:CC:DD:EE:01"
+        mac_new = "AA:BB:CC:DD:EE:02"
+
+        identity_hash = interface._compute_identity_hash(identity)
+
+        # Set up state: old connection exists in identity_to_address
+        # but NOT in connected_peers, NOT in peers, and NO pending detach
+        interface.identity_to_address[identity_hash] = mac_old
+        # Note: _pending_detach is empty, driver.connected_peers is empty, peers is empty
+
+        # Should allow reconnection because old address is not connected (Check 2)
+        is_duplicate = interface._check_duplicate_identity(mac_new, identity)
+        assert not is_duplicate, "Should allow reconnection when old address is not connected"
+
+    def test_in_peers_but_not_connected_peers_still_rejects(self, mock_ble_interface):
+        """Test that being in peers dict still rejects (connection considered alive)."""
+        interface = mock_ble_interface
+
+        identity = b'\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10'
+        mac_old = "AA:BB:CC:DD:EE:01"
+        mac_new = "AA:BB:CC:DD:EE:02"
+
+        identity_hash = interface._compute_identity_hash(identity)
+
+        # Set up state: NOT in connected_peers but IS in peers
+        # This simulates a state where the driver doesn't know about the peer
+        # but our internal tracking does - we should still reject
+        interface.identity_to_address[identity_hash] = mac_old
+        interface.peers[mac_old] = {"connected": True}
+        # Note: driver.connected_peers is empty
+
+        # Should reject because old address is in peers dict
+        # The logic checks: if existing_address not in self.driver.connected_peers
+        #                   AND existing_address not in self.peers
+        # Here the second condition fails, so it falls through to zombie check
+        is_duplicate = interface._check_duplicate_identity(mac_new, identity)
+        # Since no timestamp exists and no pending detach, it should reject
+        assert is_duplicate, "Should reject when old address is still in peers"
+
+
+class TestZombieDisconnectExceptionHandling:
+    """Test exception handling when zombie disconnect fails."""
+
+    @pytest.fixture
+    def mock_ble_interface(self):
+        """Create a mock BLEInterface with real method bindings."""
+        try:
+            from ble_reticulum.BLEInterface import BLEInterface
+        except ImportError:
+            pytest.skip("BLEInterface not available")
+
+        interface = Mock(spec=BLEInterface)
+        interface.identity_to_address = {}
+        interface.address_to_identity = {}
+        interface.address_to_interface = {}
+        interface.pending_mtu = {}
+        interface.fragmenters = {}
+        interface.reassemblers = {}
+        interface.frag_lock = threading.RLock()
+        interface.peers = {}
+        interface._pending_detach = {}
+        interface._last_real_data = {}
+        interface._zombie_timeout = 30.0
+        interface.driver = Mock()
+        interface.driver.connected_peers = []
+        interface.driver.disconnect = Mock()
+
+        from ble_reticulum.BLEInterface import BLEInterface as RealInterface
+
+        interface._check_duplicate_identity = lambda addr, identity: RealInterface._check_duplicate_identity(interface, addr, identity)
+        interface._compute_identity_hash = lambda identity: RealInterface._compute_identity_hash(interface, identity)
+        interface._cleanup_stale_address = lambda ih, addr: RealInterface._cleanup_stale_address(interface, ih, addr)
+        interface._get_fragmenter_key = lambda identity, addr: RealInterface._get_fragmenter_key(interface, identity, addr)
+        interface.__str__ = Mock(return_value="BLEInterface[Test]")
+
+        return interface
+
+    def test_zombie_disconnect_exception_still_allows_reconnection(self, mock_ble_interface):
+        """Test that exception during zombie disconnect doesn't prevent reconnection."""
+        interface = mock_ble_interface
+
+        identity = b'\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10'
+        mac_old = "AA:BB:CC:DD:EE:01"
+        mac_new = "AA:BB:CC:DD:EE:02"
+
+        identity_hash = interface._compute_identity_hash(identity)
+
+        # Set up zombie state: old connection in maps, in connected_peers, timestamp is old
+        interface.identity_to_address[identity_hash] = mac_old
+        interface.address_to_identity[mac_old] = identity
+        interface.driver.connected_peers.append(mac_old)
+        interface.peers[mac_old] = {"connected": True}
+        interface._last_real_data[identity_hash] = time.time() - 60  # 60 seconds ago (zombie)
+
+        # Make disconnect raise an exception
+        interface.driver.disconnect.side_effect = Exception("BLE disconnect failed")
+
+        # Should still allow reconnection despite exception
+        is_duplicate = interface._check_duplicate_identity(mac_new, identity)
+        assert not is_duplicate, "Should allow reconnection even when zombie disconnect fails"
+
+        # Verify disconnect was attempted
+        interface.driver.disconnect.assert_called_once_with(mac_old)
+
+
 class TestZombieCleanupOnDetach:
     """Test that _last_real_data is cleaned up when interface is detached."""
 
