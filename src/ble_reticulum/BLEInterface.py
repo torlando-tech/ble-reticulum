@@ -1893,6 +1893,12 @@ class BLEInterface(Interface):
         if not peer_identity:
             # Try identity cache - peer may have "disconnected" from Python's view
             # but Android/driver layer maintains the GATT connection
+            #
+            # POTENTIAL RACE CONDITION: If MAC rotation occurred and data arrives from
+            # the OLD address before onAddressChanged callback fires, we could restore
+            # a stale mapping here. This is a very narrow window since onAddressChanged
+            # is invoked synchronously from Kotlin during deduplication. The cache entry
+            # for the old address gets cleaned up in _address_changed_callback().
             cached = self._identity_cache.get(peer_address)
             if cached and (time.time() - cached[1]) < self._identity_cache_ttl:
                 peer_identity = cached[0]
