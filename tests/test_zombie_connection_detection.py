@@ -556,3 +556,145 @@ class TestZombieCleanupOnDetach:
         # Timestamp should be cleaned up
         assert identity_hash not in interface._last_real_data, \
             "Detaching interface should clean up timestamp"
+
+
+class TestIdentityHandshakeCoverage:
+    """Tests for _handle_identity_handshake to achieve full PR coverage."""
+
+    @pytest.fixture
+    def ble_interface(self):
+        """Create a real BLEInterface for testing."""
+        import sys
+        import os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+
+        from tests.mock_ble_driver import MockBLEDriver
+        from ble_reticulum.BLEInterface import BLEInterface
+
+        driver = MockBLEDriver(local_address="AA:BB:CC:DD:EE:FF")
+
+        class MockOwner:
+            def inbound(self, data, interface):
+                pass
+
+        config = {"name": "TestInterface", "enable_peripheral": True}
+        interface = BLEInterface(MockOwner(), config)
+        interface.driver = driver
+
+        # Mock get_peer_mtu needed for handshake
+        driver.get_peer_mtu = Mock(return_value=185)
+
+        return interface
+
+    def test_non_16_byte_data_returns_false(self, ble_interface):
+        """Test that non-16-byte data returns False (not a handshake)."""
+        interface = ble_interface
+        address = "11:22:33:44:55:66"
+
+        # 15 bytes - too short
+        result = interface._handle_identity_handshake(address, b'\x00' * 15)
+        assert result is False, "15-byte data should return False"
+
+        # 17 bytes - too long
+        result = interface._handle_identity_handshake(address, b'\x00' * 17)
+        assert result is False, "17-byte data should return False"
+
+    def test_duplicate_handshake_matching_identity_consumed(self, ble_interface):
+        """Test that duplicate 16-byte handshake matching known identity is consumed."""
+        interface = ble_interface
+        address = "11:22:33:44:55:66"
+        identity = b'\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10'
+
+        # Pre-set identity (simulating Kotlin callback)
+        interface.address_to_identity[address] = identity
+        identity_hash = interface._compute_identity_hash(identity)
+        interface.identity_to_address[identity_hash] = address
+
+        # Same 16 bytes arrives - should be consumed
+        result = interface._handle_identity_handshake(address, identity)
+        assert result is True, "Duplicate handshake should be consumed"
+
+    def test_duplicate_handshake_different_data_still_consumed(self, ble_interface):
+        """Test that 16-byte data different from known identity is still consumed."""
+        interface = ble_interface
+        address = "11:22:33:44:55:66"
+        known_identity = b'\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10'
+        different_data = b'\xff\xfe\xfd\xfc\xfb\xfa\xf9\xf8\xf7\xf6\xf5\xf4\xf3\xf2\xf1\xf0'
+
+        # Pre-set identity
+        interface.address_to_identity[address] = known_identity
+        identity_hash = interface._compute_identity_hash(known_identity)
+        interface.identity_to_address[identity_hash] = address
+
+        # Different 16 bytes arrives - should still be consumed
+        result = interface._handle_identity_handshake(address, different_data)
+        assert result is True, "Different 16-byte data should be consumed"
+
+    def test_new_handshake_cleans_pending_identity(self, ble_interface):
+        """Test that successful handshake cleans up _pending_identity_connections."""
+        interface = ble_interface
+        address = "11:22:33:44:55:66"
+        identity = b'\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10'
+
+        # Set pending identity connection
+        interface._pending_identity_connections[address] = time.time()
+
+        # Process handshake
+        result = interface._handle_identity_handshake(address, identity)
+
+        assert result is True, "Handshake should succeed"
+        assert address not in interface._pending_identity_connections, \
+            "Pending identity should be cleaned up"
+
+
+class TestSpawnPeerInterfaceZombieTracking:
+    """Test zombie tracking initialization in _spawn_peer_interface."""
+
+    @pytest.fixture
+    def ble_interface(self):
+        """Create a real BLEInterface for testing."""
+        import sys
+        import os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+
+        from tests.mock_ble_driver import MockBLEDriver
+        from ble_reticulum.BLEInterface import BLEInterface
+
+        driver = MockBLEDriver(local_address="AA:BB:CC:DD:EE:FF")
+
+        class MockOwner:
+            def inbound(self, data, interface):
+                pass
+
+        config = {"name": "TestInterface", "enable_peripheral": True}
+        interface = BLEInterface(MockOwner(), config)
+        interface.driver = driver
+
+        return interface
+
+    def test_spawn_initializes_zombie_tracking(self, ble_interface):
+        """Test that spawning a peer interface initializes zombie tracking."""
+        interface = ble_interface
+        address = "11:22:33:44:55:66"
+        identity = b'\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10'
+        identity_hash = interface._compute_identity_hash(identity)
+
+        # Ensure no timestamp before spawn
+        assert identity_hash not in interface._last_real_data
+
+        # Spawn peer interface
+        before_time = time.time()
+        interface._spawn_peer_interface(
+            address=address,
+            name="Test-Peer",
+            peer_identity=identity,
+            mtu=185
+        )
+        after_time = time.time()
+
+        # Verify timestamp was initialized
+        assert identity_hash in interface._last_real_data, \
+            "Spawning should initialize zombie tracking"
+        timestamp = interface._last_real_data[identity_hash]
+        assert before_time <= timestamp <= after_time, \
+            "Timestamp should be within spawn window"
