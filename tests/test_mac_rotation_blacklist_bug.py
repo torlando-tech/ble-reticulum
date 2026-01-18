@@ -55,6 +55,8 @@ class TestMacRotationBlacklistBug:
         interface.discovered_peers = {}
         interface.peers = {}  # Track connected peers
         interface._pending_detach = {}  # Track pending interface detachments
+        interface._last_real_data = {}  # Track last real data activity for zombie detection
+        interface._zombie_timeout = 30.0  # Zombie connection timeout
 
         # Mock driver (needed for _record_connection_failure and connection checks)
         interface.driver = Mock()
@@ -384,6 +386,8 @@ class TestPeripheralModeDuplicateRejection:
         interface.address_to_identity = {}
         interface.peers = {}  # Track connected peers
         interface._pending_detach = {}  # Track pending interface detachments
+        interface._last_real_data = {}  # Track last real data activity for zombie detection
+        interface._zombie_timeout = 30.0  # Zombie connection timeout
 
         # Mock driver for disconnect calls and connection checks
         interface.driver = MagicMock()

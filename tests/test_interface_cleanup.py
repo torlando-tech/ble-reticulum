@@ -99,6 +99,10 @@ def ble_interface(mock_rns, mock_driver):
         interface._pending_detach = {}
         interface._pending_detach_grace_period = 2.0
 
+        # Zombie detection
+        interface._last_real_data = {}
+        interface._zombie_timeout = 30.0
+
         # Fragmentation
         interface.fragmenters = {}
         interface.reassemblers = {}
