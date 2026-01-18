@@ -53,54 +53,55 @@ if not hasattr(RNS, 'Identity'):
     RNS.Identity = MagicMock()
     RNS.Identity.full_hash = lambda x: (x * 2)[:16]  # Simple mock
 
-# Mock ble_reticulum.Interface (required by BLEInterface.py)
-# First, ensure mock is in place BEFORE any imports that need it
-rns_interfaces_mock = MagicMock()
-_sys.modules['ble_reticulum'] = rns_interfaces_mock
-_sys.modules['ble_reticulum.Interface'] = MagicMock()
+# Mock ble_reticulum.Interface module (the base class module, not the whole namespace)
+# We only mock the Interface.py module, allowing BLEInterface.py to be imported from src/
+if 'ble_reticulum.Interface' not in _sys.modules:
+    # Create mock Interface base class
+    class MockInterface:
+        MODE_FULL = 1
+        def __init__(self):
+            self.IN = True
+            self.OUT = True
+            self.online = False
 
-# Create mock Interface base class
-class MockInterface:
-    MODE_FULL = 1
-    def __init__(self):
-        self.IN = True
-        self.OUT = True
-        self.online = False
+        @staticmethod
+        def get_config_obj(configuration):
+            """Mock config object wrapper - just returns a dict-like object."""
+            class ConfigObj:
+                def __init__(self, config):
+                    self._config = config if config else {}
 
-    @staticmethod
-    def get_config_obj(configuration):
-        """Mock config object that returns dict values via attribute access."""
-        class ConfigObj:
-            def __init__(self, config_dict):
-                self._config = config_dict if isinstance(config_dict, dict) else {}
+                def __getitem__(self, key):
+                    return self._config.get(key)
 
-            def __getattr__(self, name):
-                return self._config.get(name)
+                def get(self, key, default=None):
+                    return self._config.get(key, default)
 
-            def __contains__(self, key):
-                return key in self._config
+                def as_string(self, key, default=None):
+                    val = self._config.get(key, default)
+                    return str(val) if val is not None else default
 
-            def get(self, key, default=None):
-                return self._config.get(key, default)
+                def as_int(self, key, default=None):
+                    val = self._config.get(key, default)
+                    return int(val) if val is not None else default
 
-            def as_dict(self):
-                return self._config
+                def as_bool(self, key, default=False):
+                    val = self._config.get(key, default)
+                    if isinstance(val, bool):
+                        return val
+                    if isinstance(val, str):
+                        return val.lower() in ('true', 'yes', '1', 'on')
+                    return bool(val) if val is not None else default
+            return ConfigObj(configuration)
 
-        return ConfigObj(configuration)
-
-rns_interfaces_mock.Interface = MockInterface
-_sys.modules['ble_reticulum.Interface'].Interface = MockInterface
+    # Create a mock module for ble_reticulum.Interface
+    interface_module = MagicMock()
+    interface_module.Interface = MockInterface
+    _sys.modules['ble_reticulum.Interface'] = interface_module
 
 from tests.mock_ble_driver import MockBLEDriver
-
-# Import BLEInterface directly using importlib to bypass RNS namespace conflicts
-import importlib.util
-_ble_interface_path = os.path.join(os.path.dirname(__file__), '..', 'src', 'RNS', 'Interfaces', 'BLEInterface.py')
-_spec = importlib.util.spec_from_file_location("BLEInterface", _ble_interface_path)
-_ble_module = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_ble_module)
-BLEInterface = _ble_module.BLEInterface
-DiscoveredPeer = _ble_module.DiscoveredPeer
+from ble_reticulum.BLEInterface import BLEInterface, DiscoveredPeer
+from ble_reticulum.BLEFragmentation import BLEFragmenter, BLEReassembler
 import time
 
 
@@ -172,8 +173,8 @@ class TestIdentityHandshakeBasics:
 
         # Create fragmenter and peer interface (simulating post-handshake state)
         frag_key = interface._get_fragmenter_key(existing_identity, central_address)
-        interface.fragmenters[frag_key] = interface._create_fragmenter(185)
-        interface.reassemblers[frag_key] = interface._create_reassembler()
+        interface.fragmenters[frag_key] = BLEFragmenter(mtu=185)
+        interface.reassemblers[frag_key] = BLEReassembler()
 
         # Receive 16-byte data packet (should be processed as data, not handshake)
         data_packet = b'\xaa\xbb\xcc\xdd\xee\xff\x11\x22\x33\x44\x55\x66\x77\x88\x99\x00'
@@ -273,11 +274,7 @@ class TestIdentityHandshakeBidirectional:
         peripheral_driver = MockBLEDriver(local_address="BB:BB:BB:BB:BB:BB")
         MockBLEDriver.link_drivers(central_driver, peripheral_driver)
 
-        # Set peripheral identity
-        peripheral_identity = b'\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11'
-        peripheral_driver.set_identity(peripheral_identity)
-
-        # Start both drivers
+        # Start both drivers first (sets up characteristic UUIDs)
         central_driver.start(
             service_uuid="test-uuid",
             rx_char_uuid="rx-uuid",
@@ -290,6 +287,10 @@ class TestIdentityHandshakeBidirectional:
             tx_char_uuid="tx-uuid",
             identity_char_uuid="identity-uuid"
         )
+
+        # Set peripheral identity (after start() so characteristic UUID is available)
+        peripheral_identity = b'\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11'
+        peripheral_driver.set_identity(peripheral_identity)
 
         # Central connects to peripheral
         central_driver.connect(peripheral_driver.local_address)

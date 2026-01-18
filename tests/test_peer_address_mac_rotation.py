@@ -243,6 +243,9 @@ class TestPeerAddressMacRotation:
 
         When we receive an identity handshake from a new address but already have
         an interface for that identity, we must update peer_address.
+
+        Note: This simulates MAC rotation where the old connection has dropped
+        but the peer interface is still alive (waiting for reconnection).
         """
         old_addr = ble_interface._old_address
         new_addr = ble_interface._new_address
@@ -253,8 +256,16 @@ class TestPeerAddressMacRotation:
         assert mock_peer_interface.peer_address == old_addr
         assert identity_hash in ble_interface.spawned_interfaces
 
-        # Setup: peer connected at new address - but NO identity mapping yet
-        # This simulates a central reconnecting at a new MAC address
+        # Setup for MAC rotation: old connection is gone, new connection arrives
+        # Remove old address from peers (simulates old connection dropped)
+        del ble_interface.peers[old_addr]
+        # Remove old address from address_to_identity (cleaned up after disconnect)
+        del ble_interface.address_to_identity[old_addr]
+        # Remove old address from identity_to_address
+        # (this gets cleared during disconnect cleanup in real code)
+        del ble_interface.identity_to_address[identity_hash]
+
+        # New peer connects at new address
         ble_interface.peers[new_addr] = (Mock(is_connected=True), 0, 185)
         # NOTE: Do NOT add new_addr to address_to_identity - the handshake does that
 

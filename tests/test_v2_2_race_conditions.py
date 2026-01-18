@@ -64,11 +64,9 @@ if not hasattr(RNS, 'Identity'):
     RNS.Identity = MagicMock()
     RNS.Identity.full_hash = lambda x: (x * 2)[:16]
 
-# Mock ble_reticulum.Interface (required by BLEInterface.py)
-if 'ble_reticulum' not in _sys.modules:
-    rns_interfaces_mock = MagicMock()
-    _sys.modules['ble_reticulum'] = rns_interfaces_mock
-
+# Mock ble_reticulum.Interface module (the base class module, not the whole namespace)
+# We only mock the Interface.py module, allowing BLEInterface.py to be imported from src/
+if 'ble_reticulum.Interface' not in _sys.modules:
     # Create mock Interface base class
     class MockInterface:
         MODE_FULL = 1
@@ -77,7 +75,40 @@ if 'ble_reticulum' not in _sys.modules:
             self.OUT = True
             self.online = False
 
-    rns_interfaces_mock.Interface = MockInterface
+        @staticmethod
+        def get_config_obj(configuration):
+            """Mock config object wrapper - just returns a dict-like object."""
+            class ConfigObj:
+                def __init__(self, config):
+                    self._config = config if config else {}
+
+                def __getitem__(self, key):
+                    return self._config.get(key)
+
+                def get(self, key, default=None):
+                    return self._config.get(key, default)
+
+                def as_string(self, key, default=None):
+                    val = self._config.get(key, default)
+                    return str(val) if val is not None else default
+
+                def as_int(self, key, default=None):
+                    val = self._config.get(key, default)
+                    return int(val) if val is not None else default
+
+                def as_bool(self, key, default=False):
+                    val = self._config.get(key, default)
+                    if isinstance(val, bool):
+                        return val
+                    if isinstance(val, str):
+                        return val.lower() in ('true', 'yes', '1', 'on')
+                    return bool(val) if val is not None else default
+            return ConfigObj(configuration)
+
+    # Create a mock module for ble_reticulum.Interface
+    interface_module = MagicMock()
+    interface_module.Interface = MockInterface
+    _sys.modules['ble_reticulum.Interface'] = interface_module
 
 from tests.mock_ble_driver import MockBLEDriver
 from ble_reticulum.BLEInterface import BLEInterface, DiscoveredPeer
@@ -121,7 +152,8 @@ class TestRateLimiting:
 
     def test_connection_allowed_after_5_seconds(self):
         """Test that connection is allowed after 5-second cooldown."""
-        driver = MockBLEDriver(local_address="AA:BB:CC:DD:EE:FF")
+        # Use local MAC lower than peer MAC so connection direction allows us to initiate
+        driver = MockBLEDriver(local_address="11:11:11:11:11:11")
         owner = MockOwner()
 
         config = {"name": "Test", "enable_central": True}
@@ -129,7 +161,7 @@ class TestRateLimiting:
         interface.driver = driver
         interface.local_address = driver.local_address
 
-        peer_address = "11:22:33:44:55:66"
+        peer_address = "22:22:22:22:22:22"
         peer = DiscoveredPeer(peer_address, "TestPeer", -60)
 
         # Record connection attempt 6 seconds ago (past cooldown)
@@ -146,7 +178,8 @@ class TestRateLimiting:
 
     def test_never_attempted_peer_allowed(self):
         """Test that peer with no prior attempts is allowed."""
-        driver = MockBLEDriver(local_address="AA:BB:CC:DD:EE:FF")
+        # Use local MAC lower than peer MAC so connection direction allows us to initiate
+        driver = MockBLEDriver(local_address="11:11:11:11:11:11")
         owner = MockOwner()
 
         config = {"name": "Test", "enable_central": True}
@@ -154,7 +187,7 @@ class TestRateLimiting:
         interface.driver = driver
         interface.local_address = driver.local_address
 
-        peer_address = "11:22:33:44:55:66"
+        peer_address = "22:22:22:22:22:22"
         peer = DiscoveredPeer(peer_address, "TestPeer", -60)
 
         # last_connection_attempt == 0 (never attempted)
@@ -208,7 +241,8 @@ class TestDriverStateTracking:
 
     def test_multiple_rapid_discoveries_handled(self):
         """Test that rapid discovery callbacks don't cause duplicate connections."""
-        driver = MockBLEDriver(local_address="AA:BB:CC:DD:EE:FF")
+        # Use local MAC lower than peer MAC so connection direction allows us to initiate
+        driver = MockBLEDriver(local_address="11:11:11:11:11:11")
         owner = MockOwner()
 
         config = {"name": "Test", "enable_central": True}
@@ -216,21 +250,30 @@ class TestDriverStateTracking:
         interface.driver = driver
         interface.local_address = driver.local_address
 
-        peer_address = "11:22:33:44:55:66"
+        peer_address = "22:22:22:22:22:22"
         peer = DiscoveredPeer(peer_address, "TestPeer", -60)
 
-        # Simulate rapid discovery callbacks (5 times in quick succession)
-        for i in range(5):
-            interface.discovered_peers[peer_address] = peer
-            interface._select_peers_to_connect()
+        # Manually record the first connection attempt (simulating what _try_connect_to_peer does)
+        # This is needed because _select_peers_to_connect() only returns peers to connect,
+        # it doesn't actually initiate the connection or record the attempt
+        interface.discovered_peers[peer_address] = peer
+        first_selection = interface._select_peers_to_connect()
 
-        # After first selection, peer should have recorded attempt
-        # Subsequent selections should be rate-limited
+        # First selection should include the peer
+        assert len(first_selection) == 1
+        assert first_selection[0].address == peer_address
 
-        # Check that last_connection_attempt was recorded
+        # Record the attempt (simulating what happens when connection is initiated)
+        peer.record_connection_attempt()
+
+        # Subsequent rapid selections should be rate-limited
+        for i in range(4):
+            subsequent_selection = interface._select_peers_to_connect()
+            # Should be empty because peer was just attempted
+            assert len(subsequent_selection) == 0, f"Selection {i+2} should be empty due to rate limiting"
+
+        # Verify timestamp was recorded
         assert peer.last_connection_attempt > 0
-
-        # Verify recent timestamp
         time_since = time.time() - peer.last_connection_attempt
         assert time_since < 1.0  # Should be very recent
 

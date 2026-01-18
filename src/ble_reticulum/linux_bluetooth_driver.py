@@ -1204,7 +1204,14 @@ class LinuxBluetoothDriver(BLEDriverInterface):
             if self.on_error:
                 self.on_error("warning", f"Connection timeout to {address}", None)
         except Exception as e:
-            self._log(f"Connection failed to {address}: {e}", "ERROR")
+            error_str = str(e)
+            is_duplicate_identity = "Duplicate identity" in error_str
+
+            # Log with appropriate level
+            if is_duplicate_identity:
+                self._log(f"Duplicate identity rejected for {address}: {e}", "WARNING")
+            else:
+                self._log(f"Connection failed to {address}: {e}", "ERROR")
 
             # Clean up BlueZ state by explicitly disconnecting client
             try:
@@ -1224,7 +1231,13 @@ class LinuxBluetoothDriver(BLEDriverInterface):
                 self._log(f"Error removing BlueZ device {address} after failure: {removal_e}", "DEBUG")
 
             if self.on_error:
-                self.on_error("error", f"Connection failed to {address}: {e}", e)
+                if is_duplicate_identity:
+                    # Use safe message format that doesn't trigger blacklist
+                    # The blacklist regex matches "Connection failed to" and "Connection timeout to"
+                    # Using "Duplicate identity rejected for" avoids the blacklist
+                    self.on_error("info", f"Duplicate identity rejected for {address} (MAC rotation)", e)
+                else:
+                    self.on_error("error", f"Connection failed to {address}: {e}", e)
         finally:
             # Backup cleanup (primary cleanup is via Future callback in connect())
             # This provides defense-in-depth in case the callback doesn't execute

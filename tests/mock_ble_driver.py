@@ -80,7 +80,7 @@ class MockBLEDriver(BLEDriverInterface):
 
         # Callbacks (assigned by consumer)
         self.on_device_discovered: Optional[Callable[[BLEDevice], None]] = None
-        self.on_device_connected: Optional[Callable[[str], None]] = None
+        self.on_device_connected: Optional[Callable[[str, Optional[bytes]], None]] = None  # address, peer_identity
         self.on_device_disconnected: Optional[Callable[[str], None]] = None
         self.on_data_received: Optional[Callable[[str, bytes], None]] = None
         self.on_mtu_negotiated: Optional[Callable[[str, int], None]] = None
@@ -160,16 +160,21 @@ class MockBLEDriver(BLEDriverInterface):
         if address in self._connected_peers:
             return  # Already connected
 
+        # Get peer identity if linked driver is set
+        peer_identity = None
+        if self._linked_driver and self._linked_driver.local_address == address:
+            peer_identity = self._linked_driver._identity
+
         # Simulate connection with default MTU
         self._connected_peers[address] = {
             "role": "central",
             "mtu": 185,  # Default MTU
-            "identity": None
+            "identity": peer_identity
         }
 
-        # Trigger callback
+        # Trigger callback with peer identity (central mode receives identity during connection)
         if self.on_device_connected:
-            self.on_device_connected(address)
+            self.on_device_connected(address, peer_identity)
 
         # Trigger MTU negotiation callback
         if self.on_mtu_negotiated:
@@ -193,8 +198,9 @@ class MockBLEDriver(BLEDriverInterface):
             "identity": None
         }
 
+        # Peripheral role: identity is None because we receive it via handshake later
         if self.on_device_connected:
-            self.on_device_connected(address)
+            self.on_device_connected(address, None)
 
         if self.on_mtu_negotiated:
             self.on_mtu_negotiated(address, 185)

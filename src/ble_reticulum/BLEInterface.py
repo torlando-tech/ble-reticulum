@@ -1134,6 +1134,20 @@ class BLEInterface(Interface):
             central_identity = bytes(data)
             identity_hash = self._compute_identity_hash(central_identity)
 
+            # Check for duplicate identity (same identity already connected at different MAC)
+            # This prevents duplicate connections during MAC rotation overlap
+            if self._check_duplicate_identity(address, central_identity):
+                RNS.log(
+                    f"{self} duplicate identity rejected for {address} in peripheral mode (MAC rotation)",
+                    RNS.LOG_WARNING
+                )
+                # Disconnect this connection - it's a duplicate
+                try:
+                    self.driver.disconnect(address)
+                except Exception as e:
+                    RNS.log(f"{self} failed to disconnect duplicate {address}: {e}", RNS.LOG_DEBUG)
+                return True  # Consumed the handshake, rejected connection
+
             self.address_to_identity[address] = central_identity
             self.identity_to_address[identity_hash] = address
 
@@ -1779,11 +1793,18 @@ class BLEInterface(Interface):
         """
         Convert 16-byte identity to 16-character hex string for interface tracking.
 
+        Uses truncated 64-bit hash for map keys (spawned_interfaces, identity_to_address).
+        Collision risk: birthday problem collision at ~2^32 (~4 billion) identities.
+        For BLE mesh networks with <100 simultaneous peers, this is astronomically safe.
+
+        Note: Fragmenter keys use full 32-char hex via _get_fragmenter_key() for
+        maximum precision in packet reassembly.
+
         Args:
             peer_identity: 16-byte peer identity (already a hash from BLE handshake)
 
         Returns:
-            str: First 16 hex chars of identity (8 bytes)
+            str: First 16 hex chars of identity (8 bytes = 64 bits)
         """
         # peer_identity is already the identity hash from BLE handshake
         # Just convert to hex, don't re-hash (that would corrupt the identity!)
@@ -1872,6 +1893,12 @@ class BLEInterface(Interface):
         if not peer_identity:
             # Try identity cache - peer may have "disconnected" from Python's view
             # but Android/driver layer maintains the GATT connection
+            #
+            # POTENTIAL RACE CONDITION: If MAC rotation occurred and data arrives from
+            # the OLD address before onAddressChanged callback fires, we could restore
+            # a stale mapping here. This is a very narrow window since onAddressChanged
+            # is invoked synchronously from Kotlin during deduplication. The cache entry
+            # for the old address gets cleaned up in _address_changed_callback().
             cached = self._identity_cache.get(peer_address)
             if cached and (time.time() - cached[1]) < self._identity_cache_ttl:
                 peer_identity = cached[0]
@@ -1995,7 +2022,7 @@ class BLEInterface(Interface):
             try:
                 # Store central's identity
                 central_identity = bytes(data)
-                central_identity_hash = RNS.Identity.full_hash(central_identity)[:16].hex()[:16]
+                central_identity_hash = self._compute_identity_hash(central_identity)
 
                 self.address_to_identity[sender_address] = central_identity
                 self.identity_to_address[central_identity_hash] = sender_address
