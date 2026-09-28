@@ -17,6 +17,14 @@ except ImportError:
     BLEFragmenter = None
     BLEReassembler = None
 
+# Import the real BLEPeerInterface for the ifac_size regression tests.
+# This requires RNS to be importable (CI installs it); skip the dependent
+# class cleanly if it is not.
+try:
+    from ble_reticulum.BLEInterface import BLEPeerInterface
+except ImportError:
+    BLEPeerInterface = None
+
 
 # ============================================================================
 # Helper: Create Mock BLEPeerInterface
@@ -300,6 +308,63 @@ class TestPeripheralModeSend:
         # Should return False
         result = await parent.gatt_server.send_notification(b"data", peer_if.peer_address)
         assert result is False
+
+
+# ============================================================================
+# ifac_size inheritance (regression: RNS 1.5.x inbound AttributeError)
+# ============================================================================
+
+@pytest.mark.skipif(BLEPeerInterface is None, reason="RNS/ble_reticulum not importable")
+class TestPeerInterfaceIfacSize:
+    """BLEPeerInterface must carry ifac_size, inherited from the parent.
+
+    RNS 1.5.2 Transport.preprocess_inbound reads ``interface.ifac_size`` on
+    EVERY inbound packet (not just IFAC-enabled ones). The base Interface does
+    not set it; RNS assigns it on top-level interfaces via
+    ``Reticulum.add_interface`` and every other spawned-interface pattern
+    (AutoInterface, TCPInterface, I2P, Weave, Backbone) copies it from the
+    parent. BLEPeerInterface previously skipped it, so every inbound packet on
+    a BLE peer raised AttributeError and no peer announce was ever ingested -
+    "peer interfaces spawn but neither sees the other's announces".
+
+    The mock-helper tests above build a Mock() peer and therefore cannot catch
+    this; these construct the REAL BLEPeerInterface.__init__ (with the RNS base
+    class init patched out, since it requires a live Reticulum instance that
+    unit tests do not spin up).
+    """
+
+    def _make_parent(self, **overrides):
+        parent = Mock()
+        parent.HW_MTU = 512
+        parent.bitrate = 700000
+        parent.ifac_size = 1500
+        for k, v in overrides.items():
+            setattr(parent, k, v)
+        return parent
+
+    def test_ifac_size_inherited_from_parent(self):
+        """The spawned peer interface copies ifac_size from its parent."""
+        parent = self._make_parent()
+        with patch("RNS.Interfaces.Interface.Interface.__init__", return_value=None):
+            peer = BLEPeerInterface(parent, "AA:BB:CC:DD:EE:FF", "TestPeer")
+        assert peer.ifac_size == 1500
+
+    def test_ifac_size_tracks_parent_value(self):
+        """Different parent ifac_size values propagate correctly."""
+        for expected in (0, 1, 128, 1500, 4096):
+            parent = self._make_parent(ifac_size=expected)
+            with patch("RNS.Interfaces.Interface.Interface.__init__", return_value=None):
+                peer = BLEPeerInterface(parent, "AA:BB:CC:DD:EE:FF", "TestPeer")
+            assert peer.ifac_size == expected
+
+    def test_ifac_size_safe_when_parent_lacks_attribute(self):
+        """A parent without ifac_size must not crash construction (None)."""
+        parent = Mock(spec=["HW_MTU", "bitrate"])  # no ifac_size attribute
+        parent.HW_MTU = 512
+        parent.bitrate = 700000
+        with patch("RNS.Interfaces.Interface.Interface.__init__", return_value=None):
+            peer = BLEPeerInterface(parent, "AA:BB:CC:DD:EE:FF", "TestPeer")
+        assert peer.ifac_size is None
 
 
 if __name__ == "__main__":
