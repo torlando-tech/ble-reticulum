@@ -95,10 +95,20 @@ if os.path.exists(os.path.join(rns_stub_path, '__init__.py')):
 # "full RNS environment" the v2.2 tests were previously excluded for.
 
 def _ensure_reticulum_singleton():
-    """Best-effort: create a Reticulum singleton so get_instance() is live.
+    """Create a Reticulum singleton so get_instance() is live.
 
-    No-op when RNS is not importable (environments that mock it) or when an
-    instance already exists.
+    No-op (returns None) when RNS is not importable or lacks Reticulum -
+    environments that mock RNS; the real-interface tests self-skip in that
+    case via their own ImportError guards.
+
+    Deliberately does NOT swallow a RNS.Reticulum() failure: if the
+    constructor raises, let it propagate so the session errors at fixture
+    setup with the real cause, rather than silently returning (a possibly
+    None / half-initialized) get_instance() and resurfacing later as a
+    confusing missing-attribute error. Reticulum.__instance is assigned
+    inside __init__ before the body continues, so a failure part-way through
+    leaves a half-initialized instance that get_instance() would happily
+    hand back.
     """
     try:
         import RNS
@@ -108,10 +118,9 @@ def _ensure_reticulum_singleton():
         return None
     if RNS.Reticulum.get_instance() is not None:
         return RNS.Reticulum.get_instance()
-    try:
-        return RNS.Reticulum()
-    except Exception:
-        return RNS.Reticulum.get_instance()
+    # Propagate on failure: a singleton we can't create is a setup error,
+    # not a condition to paper over.
+    return RNS.Reticulum()
 
 
 @pytest.fixture(scope="session", autouse=True)
