@@ -78,6 +78,59 @@ if os.path.exists(os.path.join(rns_stub_path, '__init__.py')):
 
 
 # ============================================================================
+# Reticulum singleton for tests that construct real Interface objects
+# ============================================================================
+
+# RNS 1.5.x's base Interface.__init__ reads ingress-control defaults off the
+# Reticulum singleton:
+#     RNS.Reticulum.get_instance()._default_ic_max_held_announces()  (x9)
+# get_instance() returns None when no Reticulum instance has been created, so
+# any test that constructs a REAL BLEInterface (not Mock(spec=...)) errors at
+# fixture setup with:
+#     AttributeError: 'NoneType' object has no attribute
+#     '_default_ic_max_held_announces'
+# This surfaced on CI when test.yml's unpinned `pip install rns` picked up
+# 1.5.4 (after the last green run). Initializing the singleton once for the
+# session makes get_instance() return a live instance, which is exactly the
+# "full RNS environment" the v2.2 tests were previously excluded for.
+
+def _ensure_reticulum_singleton():
+    """Create a Reticulum singleton so get_instance() is live.
+
+    No-op (returns None) when RNS is not importable or lacks Reticulum -
+    environments that mock RNS; the real-interface tests self-skip in that
+    case via their own ImportError guards.
+
+    Deliberately does NOT swallow a RNS.Reticulum() failure: if the
+    constructor raises, let it propagate so the session errors at fixture
+    setup with the real cause, rather than silently returning (a possibly
+    None / half-initialized) get_instance() and resurfacing later as a
+    confusing missing-attribute error. Reticulum.__instance is assigned
+    inside __init__ before the body continues, so a failure part-way through
+    leaves a half-initialized instance that get_instance() would happily
+    hand back.
+    """
+    try:
+        import RNS
+    except ImportError:
+        return None
+    if not hasattr(RNS, "Reticulum"):
+        return None
+    if RNS.Reticulum.get_instance() is not None:
+        return RNS.Reticulum.get_instance()
+    # Propagate on failure: a singleton we can't create is a setup error,
+    # not a condition to paper over.
+    return RNS.Reticulum()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def reticulum_singleton():
+    """Ensure a Reticulum singleton exists for real Interface construction."""
+    _ensure_reticulum_singleton()
+    yield
+
+
+# ============================================================================
 # Async Fixtures
 # ============================================================================
 

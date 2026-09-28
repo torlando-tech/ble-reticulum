@@ -40,7 +40,7 @@ jobs:
           filters: |
             python:
               - 'src/**/*.py'
-              - 'tests/test_*.py'
+              - 'tests/*.py'      # includes conftest.py + mock_ble_driver.py, not just test_*.py
               - '*.txt'
               - '*.toml'
               - '*.cfg'
