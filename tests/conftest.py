@@ -78,6 +78,50 @@ if os.path.exists(os.path.join(rns_stub_path, '__init__.py')):
 
 
 # ============================================================================
+# Reticulum singleton for tests that construct real Interface objects
+# ============================================================================
+
+# RNS 1.5.x's base Interface.__init__ reads ingress-control defaults off the
+# Reticulum singleton:
+#     RNS.Reticulum.get_instance()._default_ic_max_held_announces()  (x9)
+# get_instance() returns None when no Reticulum instance has been created, so
+# any test that constructs a REAL BLEInterface (not Mock(spec=...)) errors at
+# fixture setup with:
+#     AttributeError: 'NoneType' object has no attribute
+#     '_default_ic_max_held_announces'
+# This surfaced on CI when test.yml's unpinned `pip install rns` picked up
+# 1.5.4 (after the last green run). Initializing the singleton once for the
+# session makes get_instance() return a live instance, which is exactly the
+# "full RNS environment" the v2.2 tests were previously excluded for.
+
+def _ensure_reticulum_singleton():
+    """Best-effort: create a Reticulum singleton so get_instance() is live.
+
+    No-op when RNS is not importable (environments that mock it) or when an
+    instance already exists.
+    """
+    try:
+        import RNS
+    except ImportError:
+        return None
+    if not hasattr(RNS, "Reticulum"):
+        return None
+    if RNS.Reticulum.get_instance() is not None:
+        return RNS.Reticulum.get_instance()
+    try:
+        return RNS.Reticulum()
+    except Exception:
+        return RNS.Reticulum.get_instance()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def reticulum_singleton():
+    """Ensure a Reticulum singleton exists for real Interface construction."""
+    _ensure_reticulum_singleton()
+    yield
+
+
+# ============================================================================
 # Async Fixtures
 # ============================================================================
 
