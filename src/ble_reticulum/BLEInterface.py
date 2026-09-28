@@ -2408,6 +2408,15 @@ class BLEPeerInterface(Interface):
         # Copy settings from parent
         self.HW_MTU = parent.HW_MTU
         self.bitrate = parent.bitrate
+        # RNS 1.5.2 (Transport.preprocess_inbound) reads interface.ifac_size on
+        # EVERY inbound packet, not just IFAC-enabled ones. The base Interface
+        # does not set it; RNS sets it on top-level interfaces via
+        # Reticulum.add_interface and every other spawned-interface pattern
+        # copies it from the parent (AutoInterface, TCPInterface, I2P, Weave,
+        # Backbone). Without this, the spawned BLE peer interface has no
+        # ifac_size and every inbound packet raises AttributeError, so peers
+        # never become visible destinations. Mirror the RNS convention.
+        self.ifac_size = getattr(parent, "ifac_size", None)
 
         # Set interface mode (required by Transport for routing decisions)
         self.mode = Interface.MODE_FULL  # Full mode: can send and receive
