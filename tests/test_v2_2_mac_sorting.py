@@ -522,5 +522,88 @@ class TestMACRotationBypassesSorting:
             "Normal MAC sorting should skip peer with lower MAC"
 
 
+class TestScanLoopSameAddressRegression:
+    """
+    Regression coverage for the same-address (normalized) scan-loop branch that
+    PR #48 changed.
+
+    The branch (in `_select_peers_to_connect`, the `elif existing_address and
+    norm_existing == norm_address` arm) fires when a stored peripheral-form
+    address ("dev:AA:BB:..") and a freshly scanned bare central-form address
+    ("AA:BB:..") normalize to the SAME physical MAC for an identity that already
+    has a spawned interface. The decision it pins: the peer is SKIPPED here
+    (interface already exists), rather than being treated as a MAC rotation.
+
+    These tests exist so a future edit cannot silently alter that reconnect /
+    dual-connection decision. The local MAC is chosen LOWER than the peer's so
+    that, absent the interface-exists skip, MAC sorting would have INCLUDED the
+    peer (we initiate) - making the skip the only reason for exclusion, which
+    is exactly the behavior we are pinning.
+    """
+
+    IDENTITY = b"\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10"
+
+    def _make_interface(self, local_mac, stored_addr, spawn_interface):
+        driver = MockBLEDriver(local_address=local_mac)
+        owner = MockOwner()
+        interface = BLEInterface(owner, {"name": "Test", "enable_central": True})
+        interface.driver = driver
+        interface.local_address = local_mac
+
+        peer_addr = "AA:BB:CC:DD:EE:FF"  # bare central-form address (higher than local)
+        interface.discovered_peers[peer_addr] = DiscoveredPeer(peer_addr, "Peer", -60)
+        interface.address_to_identity[peer_addr] = self.IDENTITY
+        identity_hash = interface._compute_identity_hash(self.IDENTITY)
+        interface.identity_to_address[identity_hash] = stored_addr
+        if spawn_interface:
+            interface.spawned_interfaces[identity_hash] = Mock(spec=BLEInterface)
+        # Simulate a stale-interface state: NOT currently connected.
+        interface.peers = {}
+        return interface, peer_addr
+
+    def test_same_mac_dev_prefix_interface_exists_is_skipped(self):
+        """
+        A stored "dev:AA:BB:.." peripheral address and a scanned "AA:BB:.."
+        central address for the SAME identity that already has a spawned
+        interface are skipped (not treated as a MAC rotation), even when the
+        connection is stale (not in self.peers). This is the behavior PR #48
+        introduced by normalizing the comparison.
+        """
+        interface, peer_addr = self._make_interface(
+            local_mac="11:22:33:44:55:66",
+            stored_addr="dev:AA:BB:CC:DD:EE:FF",
+            spawn_interface=True,
+        )
+        selected = interface._select_peers_to_connect()
+        selected_addrs = [p.address for p in selected]
+        assert peer_addr not in selected_addrs, (
+            "Same-MAC peer with an existing interface must be skipped by the "
+            "normalized same-address branch, not re-added as a 'MAC rotation'."
+        )
+
+    def test_no_existing_interface_same_mac_is_included(self):
+        """
+        Contrast: the SAME peer and SAME stored "dev:" address, but with NO
+        spawned interface, is NOT caught by the interface-exists branch and so
+        falls through to MAC sorting, where (local MAC lower) it IS included.
+        This proves the skip in the previous test is caused by the branch
+        (existing interface), not by some other gate - so a future change to
+        the branch's skip decision would flip this pair of assertions and
+        fail the suite.
+        """
+        interface, peer_addr = self._make_interface(
+            local_mac="11:22:33:44:55:66",
+            stored_addr="dev:AA:BB:CC:DD:EE:FF",
+            spawn_interface=False,
+        )
+        selected = interface._select_peers_to_connect()
+        selected_addrs = [p.address for p in selected]
+        assert peer_addr in selected_addrs, (
+            "With no existing interface, the peer falls through to MAC sorting "
+            "and (local MAC lower) is included - confirming the interface-exists "
+            "branch is what skips it in the paired test."
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -1724,7 +1724,16 @@ class BLEInterface(Interface):
                             scored_peers.append((score, peer))
                             continue  # Skip remaining checks, peer already added
                     elif existing_address and norm_existing == norm_address:
-                        # Same address, interface exists - skip
+                        # Same physical peer (MAC matches once normalized, e.g.
+                        # a stored "dev:AA:BB" peripheral form vs a scanned
+                        # "AA:BB" central form for the same fixed-MAC peer).
+                        # An interface already exists for this identity, so skip
+                        # it here - the same-MAC reconnect path is the standard
+                        # top-level gate (the "address in self.peers" skip), not
+                        # this branch. This decision is pinned by
+                        # tests/test_ble_dup_identity_mac_normalize.py
+                        # (TestScanLoopSameAddressRegression) so a future change
+                        # to it cannot silently alter reconnect behavior.
                         RNS.log(f"{self} [v2.2] skipping {peer.name} - interface exists for identity {identity_hash[:8]}",
                                 RNS.LOG_DEBUG)
                         continue
