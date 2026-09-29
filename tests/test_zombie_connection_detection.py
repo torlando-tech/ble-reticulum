@@ -49,6 +49,7 @@ class TestZombieConnectionDetection:
 
         interface._check_duplicate_identity = lambda addr, identity: RealInterface._check_duplicate_identity(interface, addr, identity)
         interface._compute_identity_hash = lambda identity: RealInterface._compute_identity_hash(interface, identity)
+        interface._normalize_address = lambda addr: RealInterface._normalize_address(interface, addr)
         interface._cleanup_stale_address = lambda ih, addr: RealInterface._cleanup_stale_address(interface, ih, addr)
         interface._get_fragmenter_key = lambda identity, addr: RealInterface._get_fragmenter_key(interface, identity, addr)
         interface.__str__ = Mock(return_value="BLEInterface[Test]")

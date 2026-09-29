@@ -71,6 +71,7 @@ class TestMacRotationBlacklistBug:
         interface._record_connection_failure = lambda addr: RealInterface._record_connection_failure(interface, addr)
         interface._is_blacklisted = lambda addr: RealInterface._is_blacklisted(interface, addr)
         interface._compute_identity_hash = lambda identity: RealInterface._compute_identity_hash(interface, identity)
+        interface._normalize_address = lambda addr: RealInterface._normalize_address(interface, addr)
 
         return interface
 
@@ -402,6 +403,7 @@ class TestPeripheralModeDuplicateRejection:
 
         interface._check_duplicate_identity = lambda addr, identity: RealInterface._check_duplicate_identity(interface, addr, identity)
         interface._compute_identity_hash = lambda identity: RealInterface._compute_identity_hash(interface, identity)
+        interface._normalize_address = lambda addr: RealInterface._normalize_address(interface, addr)
         interface._handle_identity_handshake = lambda addr, data: RealInterface._handle_identity_handshake(interface, addr, data)
 
         return interface
