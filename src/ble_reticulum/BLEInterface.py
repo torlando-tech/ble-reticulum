@@ -1731,7 +1731,7 @@ class BLEInterface(Interface):
                         # it here - the same-MAC reconnect path is the standard
                         # top-level gate (the "address in self.peers" skip), not
                         # this branch. This decision is pinned by
-                        # tests/test_ble_dup_identity_mac_normalize.py
+                        # tests/test_v2_2_mac_sorting.py
                         # (TestScanLoopSameAddressRegression) so a future change
                         # to it cannot silently alter reconnect behavior.
                         RNS.log(f"{self} [v2.2] skipping {peer.name} - interface exists for identity {identity_hash[:8]}",
