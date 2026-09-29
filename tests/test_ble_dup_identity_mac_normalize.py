@@ -192,3 +192,67 @@ class TestDuplicateIdentityMacNormalization:
             "A genuinely different MAC for the same identity (true MAC rotation) "
             "with the old connection still alive must still be rejected."
         )
+
+
+class TestBareMacMobileSafety:
+    """
+    Cross-platform blast-radius pin for the shared BLEInterface.
+
+    Android (AndroidBLEInterface) and iOS both SUBCLASS the shared
+    BLEInterface and wire on_duplicate_identity_detected -> _check_duplicate_identity
+    with no override. Their drivers (Kotlin CoreBluetooth/Bluetooth LE) produce
+    BARE, consistently-cased MACs and never the BlueZ "dev:" prefix that is the
+    whole point of the headline Linux fix. So on mobile the normalizer is a
+    no-op for the common case (same-case identical MAC) and the change must be
+    strictly safer / behavior-identical there.
+
+    These tests pin that contract on the REAL method so a future edit cannot
+    silently change mobile behavior:
+      * bare MAC, identical case, connection alive -> NOT a duplicate (unchanged)
+      * bare MAC, different MAC, connection alive  -> still rejected (guard holds)
+    """
+
+    def test_bare_mac_identical_same_case_is_not_duplicate(self):
+        """
+        The common mobile case: stored and incoming are the same bare MAC in the
+        same case, connection alive. Must NOT be treated as a duplicate - i.e.
+        the normalizer changes nothing here (no-op), exactly as before the fix.
+        """
+        interface = _make_interface("11:22:33:44:55:66")
+        peer_identity = b"\x0a" * 16
+        h = interface._compute_identity_hash(peer_identity)
+
+        bare = "B8:27:EB:43:04:BC"
+        interface.identity_to_address[h] = bare
+        interface.peers[bare] = (MagicMock(), 0, 517)
+        interface.driver.connect(bare)  # alive
+
+        rejected = interface._check_duplicate_identity(bare, peer_identity)
+        assert rejected is False, (
+            "Mobile no-op regression: a bare same-case MAC for an already-"
+            "connected peer must NOT be rejected (behavior unchanged by the "
+            "normalizer)."
+        )
+
+    def test_bare_mac_genuine_rotation_still_rejected(self):
+        """
+        Mobile guard: a genuinely different BARE MAC for the same identity with
+        the old connection alive must STILL be rejected - normalization preserves
+        the hex difference, so true MAC rotation is not disabled on mobile.
+        """
+        interface = _make_interface("11:22:33:44:55:66")
+        peer_identity = b"\x0b" * 16
+        h = interface._compute_identity_hash(peer_identity)
+
+        old_mac = "B8:27:EB:43:04:BC"
+        new_mac = "CA:FE:DE:AD:00:02"  # genuinely different bare MAC
+        interface.identity_to_address[h] = old_mac
+        interface.peers[old_mac] = (MagicMock(), 0, 517)
+        interface.driver.connect(old_mac)  # old connection alive
+
+        rejected = interface._check_duplicate_identity(new_mac, peer_identity)
+        assert rejected is True, (
+            "Mobile guard regression: a genuinely different bare MAC for the "
+            "same identity (true rotation) with the old connection alive must "
+            "still be rejected - the fix must not disable rotation protection."
+        )
