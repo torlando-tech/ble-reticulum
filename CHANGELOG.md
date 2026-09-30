@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-10
+
+### Added
+- **Data-path liveness probe (protocol v0.4.0)** — detects and recovers from "connected
+  but data-dead" BLE links. A link can stay up at the link layer (which keeps idle
+  connections alive) and keep passing 1-byte keepalives while larger real data silently
+  fails; the existing reactive zombie check, `_validate_spawned_interfaces`, and the
+  keepalive-write-fail reaper all miss this because the link is genuinely up. The probe
+  sends a 2-byte `PING`(0x04)/`PONG`(0x05) round-trip over the real data path: a healthy
+  idle link is kept fresh by the probe itself (no churn), while a probe-capable peer
+  whose data path goes silent past `data_path_timeout` is torn down so it reconnects.
+  Capability is auto-negotiated (a peer becomes probe-capable on its first PING/PONG);
+  the 2-byte frames are shorter than the fragment header so older peers reject them
+  harmlessly. New config keys: `data_path_probe_interval` (default 15s),
+  `data_path_timeout` (default 45s), `data_path_probe_poll_interval` (default 10s).
+  Validated end-to-end on two Linux/BlueZ nodes.
+
 ## [0.2.2] - 2025-11-15
 
 ### Added

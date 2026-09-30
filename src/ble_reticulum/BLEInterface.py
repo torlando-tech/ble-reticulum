@@ -399,6 +399,27 @@ class BLEInterface(Interface):
         self._last_real_data = {}
         self._zombie_timeout = 30.0  # seconds - connection is zombie if no real data for this long
 
+        # Data-path liveness probe (protocol v0.4.0). A small PING(0x04)/PONG(0x05)
+        # round-trip over the REAL data path detects a "connected but data-dead" link
+        # that neither the link layer (it keeps idle links up) nor keepalives (1-byte
+        # writes succeed while larger data fails) can catch -- then forces a reconnect.
+        # The probe IS the traffic, so a healthy IDLE link is kept fresh (no churn)
+        # while a genuinely dead data path goes stale and is reaped. Capability is
+        # auto-negotiated: a peer is marked probe-capable on the first PING/PONG seen,
+        # and only probe-capable peers are reaped on a dead path. The 2-byte frames are
+        # < the 5-byte fragment header, so peers that predate the probe reject them as
+        # "too short" and are never falsely reaped. Intervals are config-tunable.
+        self._probe_ping = 0x04
+        self._probe_pong = 0x05
+        # PING a link that has had no real data for this many seconds.
+        self._probe_interval = float(c.get("data_path_probe_interval", 15.0))
+        # Reconnect a probe-capable peer whose data path has been silent this long.
+        self._data_path_timeout = float(c.get("data_path_timeout", 45.0))
+        # How often the probe/detect loop runs.
+        self._probe_poll_interval = float(c.get("data_path_probe_poll_interval", 10.0))
+        self._probe_capable = {}          # identity_hash -> True (peer speaks the probe)
+        self._probe_timer = None
+
         # Fragmentation
         self.fragmenters = {}  # address -> BLEFragmenter (per MTU)
         self.reassemblers = {}  # address -> BLEReassembler
@@ -472,6 +493,9 @@ class BLEInterface(Interface):
         # Runs every 30 seconds to clean up timed-out buffers
         self.cleanup_timer = None
         self._start_cleanup_timer()
+
+        # Start the data-path liveness probe loop (PING/PONG -> detect data-dead -> reconnect)
+        self._start_probe_timer()
 
         # Start the interface
         self.start()
@@ -683,6 +707,91 @@ class BLEInterface(Interface):
         except Exception as e:
             RNS.log(f"{self} Error during stale path cleanup (non-fatal): {e}", RNS.LOG_WARNING)
 
+    def _send_probe(self, address, ptype, nonce):
+        """Send a 2-byte data-path probe frame (PING/PONG) over the real data path."""
+        try:
+            self.driver.send(address, bytes([ptype, nonce & 0xFF]))
+        except Exception as e:
+            RNS.log(f"{self} data-path probe send to {address} failed: {e}", RNS.LOG_DEBUG)
+
+    def _handle_probe_frame(self, address, data):
+        """
+        Handle an inbound data-path liveness frame. Returns True if `data` was a
+        probe frame (and is now consumed), False otherwise.
+
+        Receiving ANY probe frame proves the inbound data path is alive and that the
+        peer speaks the probe (so it is marked probe-capable). A PING is echoed as a
+        PONG so the sender's round-trip completes.
+        """
+        if len(data) != 2 or data[0] not in (self._probe_ping, self._probe_pong):
+            return False
+        # A peer can deliver a frame under its "dev:"-prefixed peripheral address
+        # while the central-path handshake stored its identity under the plain MAC
+        # (dual-role connection). Normalize so the identity resolves either way.
+        plain = address[4:] if address.startswith("dev:") else address
+        peer_identity = (self.address_to_identity.get(address)
+                         or self.address_to_identity.get(plain)
+                         or self.address_to_identity.get("dev:" + plain))
+        if peer_identity:
+            identity_hash = self._compute_identity_hash(peer_identity)
+            self._last_real_data[identity_hash] = time.time()
+            self._probe_capable[identity_hash] = True
+        else:
+            RNS.log(f"{self} data-path probe from unmapped address {address}, dropping", RNS.LOG_EXTREME)
+        if data[0] == self._probe_ping:
+            self._send_probe(address, self._probe_pong, data[1])
+            RNS.log(f"{self} data-path PING from {address}, replied PONG", RNS.LOG_EXTREME)
+        else:
+            RNS.log(f"{self} data-path PONG from {address}", RNS.LOG_EXTREME)
+        return True
+
+    def _start_probe_timer(self):
+        """Start/restart the periodic data-path probe + dead-path detection loop."""
+        if self._probe_timer:
+            self._probe_timer.cancel()
+        self._probe_timer = threading.Timer(self._probe_poll_interval, self._run_data_path_probes)
+        self._probe_timer.daemon = True
+        self._probe_timer.start()
+
+    def _run_data_path_probes(self):
+        """
+        Periodic data-path liveness sweep over the spawned peers.
+
+        For each peer:
+        - If the link has been idle longer than _probe_interval, send a PING. On a
+          healthy link the peer echoes a PONG, which refreshes _last_real_data -- so
+          the probe is itself the traffic that keeps a genuinely idle-but-healthy link
+          from ever looking dead. Idle links are therefore never reaped.
+        - If a probe-capable peer's data path has been silent past _data_path_timeout,
+          the link is "connected but data-dead" (the link layer keeps the connection
+          up while real data silently fails); tear it down so it re-establishes.
+
+        Peers that have never spoken the probe are not probe-capable and are left to
+        the existing reactive checks, so older peers are never falsely reaped.
+        """
+        try:
+            now = time.time()
+            for identity_hash in list(self.spawned_interfaces.keys()):
+                address = self.identity_to_address.get(identity_hash)
+                if not address:
+                    continue
+                idle = now - self._last_real_data.get(identity_hash, now)
+                if idle > self._probe_interval:
+                    self._send_probe(address, self._probe_ping, int(now))
+                if self._probe_capable.get(identity_hash) and idle > self._data_path_timeout:
+                    RNS.log(f"{self} data-path dead for {identity_hash[:8]} "
+                            f"(no real data for {idle:.0f}s > {self._data_path_timeout:.0f}s) -- reconnecting",
+                            RNS.LOG_WARNING)
+                    self._probe_capable.pop(identity_hash, None)
+                    try:
+                        self.driver.disconnect(address)
+                    except Exception as e:
+                        RNS.log(f"{self} probe-driven disconnect of {address} failed: {e}", RNS.LOG_DEBUG)
+        except Exception as e:
+            RNS.log(f"{self} data-path probe loop error: {e}", RNS.LOG_ERROR)
+        finally:
+            self._start_probe_timer()
+
     def _start_cleanup_timer(self):
         """
         Start the periodic cleanup timer.
@@ -814,6 +923,7 @@ class BLEInterface(Interface):
                 # Clean up zombie detection tracking
                 if identity_hash in self._last_real_data:
                     del self._last_real_data[identity_hash]
+                self._probe_capable.pop(identity_hash, None)
                 # Clean up fragmenter/reassembler now that interface is fully detached
                 if peer_identity:
                     frag_key = self._get_fragmenter_key(peer_identity, "")  # Address unused in key computation
@@ -1970,6 +2080,10 @@ class BLEInterface(Interface):
             RNS.log(f"{self} received keep-alive from peer {peer_address}, ignoring", RNS.LOG_EXTREME)
             return
 
+        # Data-path liveness probe (PING/PONG round-trip over the real data path)
+        if self._handle_probe_frame(peer_address, data):
+            return
+
         # Look up peer identity to compute fragmenter key
         peer_identity = self.address_to_identity.get(peer_address)
         if not peer_identity:
@@ -2098,6 +2212,10 @@ class BLEInterface(Interface):
         # Columba sends 0x00 every 15 seconds to prevent Android BLE supervision timeout
         if len(data) == 1 and data[0] == 0x00:
             RNS.log(f"{self} received keep-alive from central {sender_address}, ignoring", RNS.LOG_EXTREME)
+            return
+
+        # Data-path liveness probe (PING/PONG round-trip over the real data path)
+        if self._handle_probe_frame(sender_address, data):
             return
 
         # Check if we have peer identity
@@ -2341,6 +2459,11 @@ class BLEInterface(Interface):
         if self.cleanup_timer:
             self.cleanup_timer.cancel()
             self.cleanup_timer = None
+
+        # Cancel data-path probe timer
+        if self._probe_timer:
+            self._probe_timer.cancel()
+            self._probe_timer = None
 
         # Detach spawned interfaces
         for peer_if in list(self.spawned_interfaces.values()):
