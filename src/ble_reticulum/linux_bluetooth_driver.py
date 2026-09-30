@@ -680,20 +680,47 @@ class LinuxBluetoothDriver(BLEDriverInterface):
                 raise
 
         # Detect scanner callback corruption
+        #
+        # A service-filtered scan seeing nothing is NOT by itself evidence the
+        # adapter is wedged: at boot (and whenever no Reticulum peer is in
+        # range) it is normal for the filtered scan to return zero callbacks,
+        # because the peer's GATT server takes a few seconds to start
+        # advertising after ours. Declaring that a "corrupted / reboot
+        # required" stack is a false positive that fires on_error(critical) and
+        # tears the interface down right in the window the peer is coming up.
+        #
+        # Disambiguate with a short UNFILTERED health scan: if the adapter can
+        # see ANY device at all, it is alive and we are simply waiting for a
+        # Reticulum peer to advertise. Only a fully blind adapter (unfiltered
+        # scan also empty) counts as a genuine wedge.
         if callback_count[0] == 0:
-            self.consecutive_empty_scans += 1
-            self._log(f"⚠️ Scanner corruption detected: 0 callbacks after {scan_time}s scan (streak: {self.consecutive_empty_scans})", "WARNING")
+            health_devices = await self._adapter_health_check()
+            if health_devices > 0:
+                if self.consecutive_empty_scans > 0:
+                    self._log(f"✓ Scanner callbacks resumed after {self.consecutive_empty_scans} empty scans", "INFO")
+                self.consecutive_empty_scans = 0
+                self._log(
+                    f"✓ No Reticulum peer advertising, but adapter is healthy "
+                    f"(unfiltered health scan saw {health_devices} device(s)) - not a wedge",
+                    "INFO"
+                )
+            else:
+                self.consecutive_empty_scans += 1
+                self._log(
+                    f"⚠️ Scanner blind: 0 Reticulum callbacks AND 0 devices in unfiltered "
+                    f"health scan (streak: {self.consecutive_empty_scans})", "WARNING"
+                )
 
-            if self.consecutive_empty_scans >= 3:
-                self._log("⚠️ CRITICAL: Bleak scanner callbacks not firing", "ERROR")
-                self._log("⚠️ Bluetooth/BlueZ/D-Bus state is corrupted", "ERROR")
-                self._log("⚠️ System reboot required to restore BLE scanning", "ERROR")
+                if self.consecutive_empty_scans >= 3:
+                    self._log("⚠️ CRITICAL: Bleak scanner callbacks not firing (adapter blind to all devices)", "ERROR")
+                    self._log("⚠️ Bluetooth/BlueZ/D-Bus state is corrupted", "ERROR")
+                    self._log("⚠️ System reboot required to restore BLE scanning", "ERROR")
 
-                if self.on_error:
-                    self.on_error("critical",
-                        f"Scanner callback failure detected (0 callbacks for {self.consecutive_empty_scans} consecutive scans). "
-                        "Bluetooth stack requires reboot.",
-                        Exception("BleakScanner callbacks not invoked"))
+                    if self.on_error:
+                        self.on_error("critical",
+                            f"Scanner callback failure detected (adapter blind to all devices for "
+                            f"{self.consecutive_empty_scans} consecutive scans). Bluetooth stack requires reboot.",
+                            Exception("BleakScanner callbacks not invoked"))
         else:
             # Reset counter on successful callback
             if self.consecutive_empty_scans > 0:
@@ -735,6 +762,31 @@ class LinuxBluetoothDriver(BLEDriverInterface):
                         self._log(f"Error in device discovered callback: {e}", "ERROR")
             else:
                 self._log(f"✗ {device.address} ({device.name or 'Unknown'}): service UUID mismatch (has {adv_data.service_uuids}, want {self.service_uuid})", "EXTRA")
+
+    async def _adapter_health_check(self) -> int:
+        """Run a short UNFILTERED scan to distinguish "no Reticulum peer in
+        range" (adapter healthy) from "adapter blind" (genuine wedge).
+
+        The main discovery scan is service-filtered, so it returns zero
+        callbacks whenever no peer is advertising our Reticulum service - which
+        is the normal state at boot before the peer's GATT server starts
+        advertising. That is not evidence of a wedged adapter. To disambiguate,
+        we run a brief one-shot scan with NO service filter: if the adapter can
+        see any BLE device at all (including weak ones we would filter out by
+        RSSI), it is alive and we are simply waiting for a peer.
+
+        Returns the number of distinct devices seen (0 = adapter appears blind).
+        If the health scan itself raises, the adapter is in a bad state and we
+        return 0 so it counts toward the genuine-wedge streak.
+        """
+        try:
+            devices = await BleakScanner.discover(timeout=1.0)
+            count = len(devices)
+            self._log(f"🩺 Adapter health scan: {count} device(s) visible (unfiltered)", "DEBUG")
+            return count
+        except Exception as e:
+            self._log(f"⚠️ Adapter health scan failed: {e}", "WARNING")
+            return 0
 
     # ========================================================================
     # Advertising (Peripheral Mode)
