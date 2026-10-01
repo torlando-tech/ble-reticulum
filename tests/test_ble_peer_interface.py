@@ -367,5 +367,95 @@ class TestPeerInterfaceIfacSize:
         assert peer.ifac_size is None
 
 
+# ============================================================================
+# announce-rate attribute presence (regression: RNS stats-RPC AttributeError)
+# ============================================================================
+
+@pytest.mark.skipif(BLEPeerInterface is None, reason="RNS/ble_reticulum not importable")
+class TestPeerInterfaceAnnounceRateAttrs:
+    """BLEPeerInterface must expose the announce-rate attributes the RNS stats
+    RPC reads.
+
+    RNS's stats RPC (``RNS.Reticulum`` ifstats) reads ``announce_rate_target``,
+    ``announce_rate_penalty`` and ``announce_rate_grace`` from EVERY interface,
+    including spawned peer interfaces. RNS assigns those on top-level interfaces
+    via ``Reticulum.add_interface`` and every other spawned-interface pattern
+    (AutoInterface, TCPInterface, I2PInterface, WeaveInterface, Backbone
+    Interface) copies ``announce_rate_penalty`` from the parent, but the base
+    ``Interface`` does not set them. BLEPeerInterface only set
+    ``announce_rate_target = None``; reading ``announce_rate_penalty`` (the first
+    of the three the stats RPC hits) therefore raised
+    ``AttributeError: 'BLEPeerInterface' object has no attribute
+    'announce_rate_penalty'`` on every stats RPC call from a local client
+    (observed live on two Linux BLE nodes). This is the same bug class as the
+    ifac_size regression: an attribute RNS assumes every interface has that the
+    spawned BLE peer interface failed to provide.
+
+    The Transport data-path read of ``announce_rate_penalty`` is guarded by
+    ``announce_rate_target != None`` (and BLE peers set target=None to opt out of
+    rate limiting), so this does not affect announce delivery - it only breaks the
+    stats RPC. The fix sets grace/penalty to None, matching the "no announce rate
+    limiting for BLE peer interfaces" intent already expressed by
+    announce_rate_target=None.
+
+    These tests construct the REAL BLEPeerInterface.__init__ with the RNS base
+    class init patched out; on pre-fix code, accessing ``announce_rate_penalty``
+    (or ``announce_rate_grace``) raises AttributeError, so the class is a clean
+    red/green regression gate.
+    """
+
+    def _make_parent(self, **overrides):
+        parent = Mock()
+        parent.HW_MTU = 512
+        parent.bitrate = 700000
+        parent.ifac_size = 1500
+        for k, v in overrides.items():
+            setattr(parent, k, v)
+        return parent
+
+    def test_announce_rate_penalty_attribute_present(self):
+        """The attribute the RNS stats RPC reads first must not raise."""
+        parent = self._make_parent()
+        with patch("RNS.Interfaces.Interface.Interface.__init__", return_value=None):
+            peer = BLEPeerInterface(parent, "AA:BB:CC:DD:EE:FF", "TestPeer")
+        # Pre-fix this raises AttributeError (exactly the observed crash).
+        assert hasattr(peer, "announce_rate_penalty")
+        assert getattr(peer, "announce_rate_penalty") is None
+
+    def test_announce_rate_grace_attribute_present(self):
+        """The stats RPC also reads announce_rate_grace; it must be present."""
+        parent = self._make_parent()
+        with patch("RNS.Interfaces.Interface.Interface.__init__", return_value=None):
+            peer = BLEPeerInterface(parent, "AA:BB:CC:DD:EE:FF", "TestPeer")
+        assert hasattr(peer, "announce_rate_grace")
+        assert getattr(peer, "announce_rate_grace") is None
+
+    def test_no_announce_rate_limiting_intent_preserved(self):
+        """target stays None (BLE peers opt out of rate limiting)."""
+        parent = self._make_parent()
+        with patch("RNS.Interfaces.Interface.Interface.__init__", return_value=None):
+            peer = BLEPeerInterface(parent, "AA:BB:CC:DD:EE:FF", "TestPeer")
+        assert peer.announce_rate_target is None
+        assert peer.announce_rate_grace is None
+        assert peer.announce_rate_penalty is None
+
+    def test_stats_rpc_reads_do_not_raise(self):
+        """Simulate the RNS stats-RPC read sequence for a peer interface.
+
+        Reticulum.py ifstats does:  ifstats["announce_rate_penalty"] =
+        interface.announce_rate_penalty  (and _target, _grace). None of these may
+        raise AttributeError once the fix is present.
+        """
+        parent = self._make_parent()
+        with patch("RNS.Interfaces.Interface.Interface.__init__", return_value=None):
+            peer = BLEPeerInterface(parent, "AA:BB:CC:DD:EE:FF", "TestPeer")
+        # The exact expressions RNS stats RPC evaluates, for the peer interface.
+        _ = peer.announce_rate_target
+        _ = peer.announce_rate_penalty
+        _ = peer.announce_rate_grace
+        # If we reach here without AttributeError, the stats read is safe.
+        assert True
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

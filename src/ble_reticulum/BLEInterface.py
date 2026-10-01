@@ -2421,8 +2421,19 @@ class BLEPeerInterface(Interface):
         # Set interface mode (required by Transport for routing decisions)
         self.mode = Interface.MODE_FULL  # Full mode: can send and receive
 
-        # Announce rate limiting (required by Transport.inbound announce processing)
+        # Announce rate limiting (required by Transport.inbound announce processing
+        # AND by the RNS stats RPC, which reads all three for every interface).
+        # BLE peer interfaces intentionally have no announce rate limiting: set the
+        # target to None so the Transport rate-limit path (guarded by
+        # announce_rate_target != None) is skipped, and set grace/penalty to None so
+        # the stats RPC (Reticulum.py ifstats) does not raise AttributeError on them.
+        # Every other RNS spawned-interface pattern provides these attributes
+        # (AutoInterface, TCPInterface, I2PInterface, WeaveInterface, Backbone
+        # Interface all copy announce_rate_penalty from the parent); the base
+        # Interface does not, so we must supply them here.
         self.announce_rate_target = None  # No announce rate limiting for BLE peer interfaces
+        self.announce_rate_grace = None
+        self.announce_rate_penalty = None
 
         RNS.log(f"BLEPeerInterface initialized for {peer_name} ({peer_address}), identity={'set' if peer_identity else 'pending'}", RNS.LOG_DEBUG)
 
