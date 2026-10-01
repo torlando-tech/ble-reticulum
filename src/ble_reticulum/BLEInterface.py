@@ -1047,7 +1047,15 @@ class BLEInterface(Interface):
         identity_hash = self._compute_identity_hash(peer_identity)
         existing_address = self.identity_to_address.get(identity_hash)
 
-        if existing_address and existing_address != address:
+        # Compare normalized addresses so the same physical peer is recognized
+        # regardless of whether the stored/incoming form carries the BlueZ
+        # "dev:" prefix or differs in case. Without this, a fixed-MAC peer that
+        # is connected via one mode (e.g. peripheral, "dev:AA:BB") and
+        # reconnects via the other (central, "AA:BB") is wrongly treated as a
+        # different MAC (false Android MAC rotation) and rejected.
+        normalized_incoming = self._normalize_address(address)
+
+        if existing_address and self._normalize_address(existing_address) != normalized_incoming:
             # Same identity, different MAC - check if old connection is still alive
 
             # Check 1: Is there a pending detach for this identity?
@@ -1690,7 +1698,13 @@ class BLEInterface(Interface):
                 if identity_hash in self.spawned_interfaces:
                     # Check if existing interface is still connected
                     existing_address = self.identity_to_address.get(identity_hash)
-                    if existing_address and existing_address != address:
+                    # Normalize so a stored "dev:AA:BB" (peripheral form) and an
+                    # incoming "AA:BB" (central form) for the same fixed-MAC
+                    # peer compare equal instead of being treated as a MAC
+                    # rotation. See _normalize_address.
+                    norm_existing = self._normalize_address(existing_address)
+                    norm_address = self._normalize_address(address)
+                    if existing_address and norm_existing != norm_address:
                         # Same identity at different MAC = MAC rotation
                         # Check if old connection is still alive
                         if existing_address in self.peers:
@@ -1709,8 +1723,17 @@ class BLEInterface(Interface):
                             score = self._score_peer(peer)
                             scored_peers.append((score, peer))
                             continue  # Skip remaining checks, peer already added
-                    elif existing_address == address:
-                        # Same address, interface exists - skip
+                    elif existing_address and norm_existing == norm_address:
+                        # Same physical peer (MAC matches once normalized, e.g.
+                        # a stored "dev:AA:BB" peripheral form vs a scanned
+                        # "AA:BB" central form for the same fixed-MAC peer).
+                        # An interface already exists for this identity, so skip
+                        # it here - the same-MAC reconnect path is the standard
+                        # top-level gate (the "address in self.peers" skip), not
+                        # this branch. This decision is pinned by
+                        # tests/test_v2_2_mac_sorting.py
+                        # (TestScanLoopSameAddressRegression) so a future change
+                        # to it cannot silently alter reconnect behavior.
                         RNS.log(f"{self} [v2.2] skipping {peer.name} - interface exists for identity {identity_hash[:8]}",
                                 RNS.LOG_DEBUG)
                         continue
@@ -1888,6 +1911,37 @@ class BLEInterface(Interface):
         # peer_identity is already the identity hash from BLE handshake
         # Just convert to hex, don't re-hash (that would corrupt the identity!)
         return peer_identity.hex()[:16]
+
+    def _normalize_address(self, address):
+        """
+        Normalize a peer address for identity-mapping comparisons.
+
+        The same physical peer can be represented by more than one address
+        string depending on which code path saw it:
+
+          * peripheral (GATT) callbacks carry the BlueZ D-Bus device-path form
+            with a "dev:" prefix  -> "dev:B8:27:EB:43:04:BC"
+          * central (scan/connect) paths carry the bare MAC      -> "B8:27:EB:43:04:BC"
+
+        identity_to_address is written by whichever path stores it first, so a
+        later comparison against the other path's form would see "dev:AA:BB"
+        != "AA:BB" and wrongly conclude a different MAC (a false Android MAC
+        rotation) for a fixed-MAC peer. Stripping the "dev:" prefix and
+        upper-casing makes the same physical MAC compare equal regardless of
+        which form it arrived in, while genuinely different MACs still differ.
+
+        Args:
+            address: peer address string (may carry a "dev:" prefix)
+
+        Returns:
+            str: normalized address, or "" if address is empty
+        """
+        if not address:
+            return ""
+        addr = address.strip()
+        if addr.lower().startswith("dev:"):
+            addr = addr[4:]
+        return addr.upper()
 
     def _spawn_peer_interface(self, address, name, peer_identity, client=None, mtu=None, connection_type="central"):
         """
