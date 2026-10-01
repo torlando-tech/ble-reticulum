@@ -15,23 +15,29 @@ genuinely wedged adapter can never do without a reboot.)
 connection is in progress (the pause check at the top of _perform_scan ran
 before the main scan; a connection could have started during that window, and
 a second scan mid-connection would collide with it). Then run a short UNFILTERED
-health scan (BleakScanner.discover with no service filter). Three outcomes:
+health scan (BleakScanner.discover with no service filter). Outcomes:
   * health scan sees >= 1 device -> adapter is ALIVE, just waiting for a
     Reticulum peer; reset the streak, do NOT fire critical (the false-positive
     case at boot);
-  * health scan runs but sees 0 devices (clean zero) -> only escalate to the
-    "reboot required" critical if the adapter was PREVIOUSLY proven healthy
-    (healthy_ever) and has now gone blind. A clean zero in a genuinely quiet
-    RF environment (no BLE devices in range at all) is NOT proof the adapter is
-    broken - both scans legitimately return nothing, so warn without mandating
-    a reboot (this is the Greptile 3/5 P1 overclaim fix);
-  * health scan itself raises (D-Bus/adapter error) -> that is direct evidence
-    the adapter is in a fault state; escalate regardless of healthy_ever.
+  * health scan itself raises (D-Bus/adapter error) -> a scan that cannot run
+    is direct evidence the adapter is in a fault state; escalate to critical;
+  * health scan runs but sees 0 devices (clean zero) -> an empty scan CANNOT
+    by itself distinguish a genuinely quiet RF environment (adapter healthy,
+    no BLE devices in range) from a dead/wedged adapter. Disambiguate with the
+    adapter's OWN BlueZ "Powered" state (_adapter_is_powered):
+      - Powered=False (adapter present but not powered) -> genuine fault ->
+        fire the "reboot required" critical (this catches both an adapter that
+        was never healthy and one that went down);
+      - Powered=True (working adapter, quiet room) OR unknown (could not
+        determine) -> no positive fault evidence -> warn only, never mandating
+        a reboot, so a healthy self-recovering adapter is never torn down over
+        a quiet environment (this is the Greptile 3/5 P1 overclaim fix).
 
 **Test strategy**: Drive the REAL LinuxBluetoothDriver._perform_scan() with a
-mocked BleakScanner class. The main scan's detection callback never fires
-(empty filtered scan); the health scan's BleakScanner.discover is controlled per
-test. No real Bluetooth is touched.
+mocked BleakScanner class and a mocked _adapter_is_powered(). The main scan's
+detection callback never fires (empty filtered scan) unless fire_callback=True;
+the health scan's BleakScanner.discover and the Powered-state result are
+controlled per test. No real Bluetooth is touched.
 
 The healthy-adapter case is the RED->GREEN assertion: with the OLD code (no
 health check) the empty filtered scan would fire on_error("critical") after 3
@@ -70,18 +76,23 @@ except ImportError:
 SERVICE_UUID = "37145b00-442d-4a94-917f-8f42c5da28e3"
 
 
-def _make_driver():
+def _make_driver(adapter_powered=None):
     """Build a LinuxBluetoothDriver without running the heavy __init__.
 
-    Only the attributes _perform_scan / _adapter_health_check touch are set.
-    Using __new__ avoids the real constructor, which requires RNS + BlueZ
-    plumbing that is irrelevant to the wedge-detection logic under test.
+    Only the attributes _perform_scan / _adapter_health_check /
+    _adapter_is_powered touch are set. Using __new__ avoids the real
+    constructor, which requires RNS + BlueZ plumbing that is irrelevant to the
+    wedge-detection logic under test.
+
+    adapter_powered controls the mocked _adapter_is_powered() result:
+      True  -> adapter is powered (working, e.g. quiet room)
+      False -> adapter present but NOT powered (genuine fault)
+      None  -> state could not be determined (no positive fault evidence)
     """
     from ble_reticulum import linux_bluetooth_driver as m
     d = m.LinuxBluetoothDriver.__new__(m.LinuxBluetoothDriver)
     d._running = True
     d.consecutive_empty_scans = 0
-    d.healthy_ever = False
     d._log = Mock()
     d.on_error = Mock()
     d.service_uuid = SERVICE_UUID
@@ -90,6 +101,18 @@ def _make_driver():
     d.power_mode = "saver"
     d._should_pause_scanning = Mock(return_value=False)
     d.on_device_discovered = Mock()
+    d._adapter_is_powered = AsyncMock(return_value=adapter_powered)
+    return d
+
+
+def _make_driver_real_powered():
+    """Same as _make_driver but keeps the REAL _adapter_is_powered() (no
+    AsyncMock) so tests can drive the actual D-Bus probe with a mocked bus.
+    Sets the minimal attributes the probe reads (_log, adapter_path)."""
+    from ble_reticulum import linux_bluetooth_driver as m
+    d = m.LinuxBluetoothDriver.__new__(m.LinuxBluetoothDriver)
+    d._log = Mock()
+    d.adapter_path = "/org/bluez/hci0"
     return d
 
 
@@ -159,53 +182,66 @@ class TestAdapterHealthCheckWedgeDetection:
         assert BS.discover.await_count >= 1
 
     @pytest.mark.asyncio
-    async def test_was_healthy_then_blind_declares_wedge_after_3(self):
+    async def test_not_powered_adapter_declares_wedge_after_3(self):
         """
-        Genuine wedge: adapter was proven healthy, then goes fully blind.
-
-        This is the real corruption case - the adapter USED to see devices
-        (healthy_ever=True) and now its unfiltered scan is clean-zero for 3
-        scans. Must fire on_error("critical").
+        Genuine fault: after 3 clean-zero blind scans, the adapter is present
+        on the bus but NOT powered (Powered=False). That is positive fault
+        evidence (a working adapter in a quiet room IS powered), so the
+        "reboot required" critical must fire. Covers both an adapter that was
+        never healthy and one that went down.
         """
         from ble_reticulum import linux_bluetooth_driver as m
-        d = _make_driver()
-        d.healthy_ever = True  # adapter previously saw devices
+        d = _make_driver(adapter_powered=False)  # adapter present but not powered
         with patch.object(m, "BleakScanner", _mock_scanner_class([])):
             for _ in range(3):
                 await d._perform_scan()
-        # After the 3rd fully-blind scan the critical error must fire.
+        # After the 3rd blind scan the critical error must fire.
         d.on_error.assert_called()
         args = d.on_error.call_args[0]
         assert args[0] == "critical"
         assert d.consecutive_empty_scans >= 3
+        # The Powered state was actually consulted before escalating.
+        d._adapter_is_powered.assert_awaited()
 
     @pytest.mark.asyncio
-    async def test_quiet_rf_never_healthy_does_not_reboot(self):
+    async def test_quiet_room_powered_does_not_reboot(self):
         """
-        Greptile P1 overclaim fix: a clean zero (unfiltered scan ran but saw
-        0 devices) on an adapter that has NEVER demonstrated a working scan is
-        NOT proof the adapter is broken - in a genuinely quiet RF environment
-        both scans legitimately return nothing. Must NOT fire the reboot-
-        required critical; it only warns.
+        Greptile P1 overclaim fix (quiet room): a clean zero on a POWERED
+        adapter is a working adapter in a room with no BLE devices, NOT a
+        fault. Must NOT fire the reboot-required critical; it only warns.
+        This holds even after many scans past the threshold.
         """
         from ble_reticulum import linux_bluetooth_driver as m
-        d = _make_driver()
-        # healthy_ever stays False: adapter has never seen a device.
+        d = _make_driver(adapter_powered=True)  # working adapter, quiet room
         with patch.object(m, "BleakScanner", _mock_scanner_class([])):
             for _ in range(5):  # well past the 3-scan threshold
                 await d._perform_scan()
-        # Streak incremented, but no critical fired (quiet-room, not a fault).
+        # Streak incremented, but no critical fired (quiet room, not a fault).
         assert d.consecutive_empty_scans >= 3
         d.on_error.assert_not_called()
-        assert d.healthy_ever is False
 
     @pytest.mark.asyncio
-    async def test_successful_scan_marks_healthy(self):
+    async def test_unknown_powered_state_does_not_reboot(self):
+        """
+        When the Powered state cannot be determined (None), there is no
+        positive fault evidence - fail safe and warn without mandating a
+        reboot, so a healthy self-recovering adapter is never torn down.
+        """
+        from ble_reticulum import linux_bluetooth_driver as m
+        d = _make_driver(adapter_powered=None)  # state unknown
+        with patch.object(m, "BleakScanner", _mock_scanner_class([])):
+            for _ in range(5):
+                await d._perform_scan()
+        assert d.consecutive_empty_scans >= 3
+        d.on_error.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_successful_scan_resets_streak(self):
         """
         A filtered scan that DOES discover a Reticulum device (detection
-        callback fires) proves the adapter is healthy: it must set
-        healthy_ever=True, reset the empty-streak, and NOT fire any error.
-        This covers the callback-fired path in _perform_scan.
+        callback fires) proves the adapter is working: it must reset the
+        empty-streak and NOT fire any error. This covers the callback-fired
+        path in _perform_scan.
         """
         from ble_reticulum import linux_bluetooth_driver as m
         d = _make_driver()
@@ -213,11 +249,13 @@ class TestAdapterHealthCheckWedgeDetection:
         BS = _mock_scanner_class([], fire_callback=True)
         with patch.object(m, "BleakScanner", BS):
             await d._perform_scan()
-        assert d.healthy_ever is True
         assert d.consecutive_empty_scans == 0
         d.on_error.assert_not_called()
         # The device was forwarded to the discovered-device callback.
         d.on_device_discovered.assert_called_once()
+        # No health scan / powered query needed when the filtered scan works.
+        assert BS.discover.await_count == 0
+        d._adapter_is_powered.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_blind_then_healthy_resets_streak(self):
@@ -240,9 +278,9 @@ class TestAdapterHealthCheckWedgeDetection:
     async def test_health_scan_failure_is_fault_evidence(self):
         """If the health scan itself raises, that is direct evidence the adapter
         is in a fault state (a scan that cannot run is not a quiet room). It
-        escalates to critical regardless of healthy_ever - fail closed."""
+        escalates to critical regardless of the Powered state - fail closed."""
         from ble_reticulum import linux_bluetooth_driver as m
-        d = _make_driver()
+        d = _make_driver(adapter_powered=True)  # even if "powered", scan failing is fault
         BS = _mock_scanner_class([])
         BS.discover = AsyncMock(side_effect=RuntimeError("dbus gone"))
         with patch.object(m, "BleakScanner", BS):
@@ -250,6 +288,8 @@ class TestAdapterHealthCheckWedgeDetection:
                 await d._perform_scan()
         d.on_error.assert_called()
         assert d.on_error.call_args[0][0] == "critical"
+        # The failure short-circuits before consulting the Powered state.
+        d._adapter_is_powered.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_connection_started_during_scan_skips_health_scan(self):
@@ -292,3 +332,87 @@ class TestAdapterHealthCheckWedgeDetection:
         with patch.object(m, "BleakScanner", BS0):
             count0 = await d._adapter_health_check()
         assert count0 == 0
+
+
+class TestAdapterIsPowered:
+    """The real _adapter_is_powered() D-Bus probe: powered / not-powered /
+    unknown / no-dbus outcomes, and that the bus connection is always closed."""
+
+    def _patched_bus(self, m, powered_result):
+        """Patch m.MessageBus so the driver's _adapter_is_powered() D-Bus
+        sequence yields the given powered value (or raises).
+
+        The driver calls: await connect(); await introspect();
+        get_proxy_object() [sync]; get_interface() [sync]; await get_powered().
+        Returns (bus, adapter_iface) for assertions and the started patch.
+        """
+        bus = Mock()
+        bus.connect = AsyncMock(return_value=bus)
+        # `await bus.introspect(...)` -> Mock (truthy, unused beyond existence)
+        bus.introspect = AsyncMock(return_value=Mock())
+        # `bus.get_proxy_object(...)` [SYNC] -> adapter_obj
+        adapter_obj = Mock()
+        bus.get_proxy_object = Mock(return_value=adapter_obj)
+        # `adapter_obj.get_interface('org.bluez.Adapter1')` [SYNC] -> iface
+        adapter_iface = Mock()
+        adapter_obj.get_interface = Mock(return_value=adapter_iface)
+        # `await adapter_iface.get_powered()` -> powered value (or raises)
+        if isinstance(powered_result, Exception):
+            adapter_iface.get_powered = AsyncMock(side_effect=powered_result)
+        else:
+            adapter_iface.get_powered = AsyncMock(return_value=powered_result)
+
+        mb = patch.object(m, "MessageBus")
+        mock_bus_class = mb.start()  # start() returns the mock (not the _patch)
+        mock_bus_class.return_value = bus
+        return bus, adapter_iface, mb
+
+    @pytest.mark.asyncio
+    async def test_powered_true(self):
+        from ble_reticulum import linux_bluetooth_driver as m
+        d = _make_driver_real_powered()
+        with patch.object(m, "HAS_DBUS", True):
+            bus, adapter_iface, mb = self._patched_bus(m, True)
+            try:
+                result = await d._adapter_is_powered()
+            finally:
+                mb.stop()
+        assert result is True
+        adapter_iface.get_powered.assert_awaited()
+        bus.disconnect.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_powered_false(self):
+        from ble_reticulum import linux_bluetooth_driver as m
+        d = _make_driver_real_powered()
+        with patch.object(m, "HAS_DBUS", True):
+            bus, adapter_iface, mb = self._patched_bus(m, False)
+            try:
+                result = await d._adapter_is_powered()
+            finally:
+                mb.stop()
+        assert result is False
+        bus.disconnect.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_query_error_is_unknown(self):
+        from ble_reticulum import linux_bluetooth_driver as m
+        d = _make_driver_real_powered()
+        with patch.object(m, "HAS_DBUS", True):
+            bus, _, mb = self._patched_bus(m, RuntimeError("UnknownObject"))
+            try:
+                result = await d._adapter_is_powered()
+            finally:
+                mb.stop()
+        # A query failure is "unknown", not a positive fault.
+        assert result is None
+        bus.disconnect.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_no_dbus_is_unknown(self):
+        from ble_reticulum import linux_bluetooth_driver as m
+        d = _make_driver_real_powered()
+        with patch.object(m, "HAS_DBUS", False):
+            result = await d._adapter_is_powered()
+        # No D-Bus at all: unknown, and no bus connection is attempted.
+        assert result is None

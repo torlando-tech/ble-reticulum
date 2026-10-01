@@ -387,13 +387,6 @@ class LinuxBluetoothDriver(BLEDriverInterface):
 
         # Scanner health tracking
         self.consecutive_empty_scans = 0
-        # Whether the adapter has ever demonstrated a working scan (seen any
-        # device, or received any Reticulum callback). Used to distinguish a
-        # genuinely wedged adapter (was healthy, now blind) from a quiet RF
-        # environment where no BLE devices are present at all (never seen
-        # anything, not necessarily broken). Only the former warrants a
-        # "system reboot required" critical.
-        self.healthy_ever = False
 
         # Apply BlueZ timing patch
         apply_bluez_services_resolved_patch()
@@ -713,7 +706,6 @@ class LinuxBluetoothDriver(BLEDriverInterface):
                 return
             health_devices = await self._adapter_health_check()
             if health_devices > 0:
-                self.healthy_ever = True
                 if self.consecutive_empty_scans > 0:
                     self._log(f"✓ Scanner callbacks resumed after {self.consecutive_empty_scans} empty scans", "INFO")
                 self.consecutive_empty_scans = 0
@@ -744,43 +736,56 @@ class LinuxBluetoothDriver(BLEDriverInterface):
                             Exception("BleakScanner health scan failed"))
             else:
                 # Clean zero: unfiltered scan ran but saw no devices at all.
+                # An empty scan CANNOT by itself distinguish a genuinely quiet
+                # RF environment (adapter healthy, simply no BLE devices in
+                # range) from a dead/wedged adapter (no devices because the
+                # adapter is down). Both look identical by device count.
+                #
+                # Resolve it with the adapter's OWN Powered state (independent
+                # of what it can see): a working adapter in a quiet room reads
+                # Powered=True; a powered-off/dead one reads Powered=False.
+                # Only escalate to a "reboot required" critical on POSITIVE
+                # fault evidence (adapter present but not powered). A powered
+                # adapter, or an unknown state, only warns - never cry wolf.
                 self.consecutive_empty_scans += 1
                 self._log(
                     f"⚠️ Scanner blind: 0 Reticulum callbacks AND 0 devices in unfiltered "
                     f"health scan (streak: {self.consecutive_empty_scans})", "WARNING"
                 )
 
-                # Only escalate to a "reboot required" critical if the adapter
-                # was previously proven healthy and has now gone blind. An
-                # empty unfiltered scan in a genuinely quiet RF environment
-                # (no BLE devices in range at all) is NOT proof the adapter is
-                # broken - in that case both scans legitimately return nothing,
-                # and mandating a system reboot would be a false alarm. A truly
-                # wedged adapter is one that USED to see devices and no longer
-                # can, so gate the critical on healthy_ever.
-                if self.consecutive_empty_scans >= 3 and self.healthy_ever:
-                    self._log("⚠️ CRITICAL: adapter was healthy but is now blind to all devices (likely wedged)", "ERROR")
-                    self._log("⚠️ Bluetooth/BlueZ/D-Bus state is corrupted", "ERROR")
-                    self._log("⚠️ System reboot required to restore BLE scanning", "ERROR")
-
-                    if self.on_error:
-                        self.on_error("critical",
-                            f"Scanner callback failure detected (adapter was healthy but is blind to all devices for "
-                            f"{self.consecutive_empty_scans} consecutive scans). Bluetooth stack requires reboot.",
-                            Exception("BleakScanner callbacks not invoked"))
-                elif self.consecutive_empty_scans >= 3:
-                    # Never demonstrated a working scan: this may simply be a
-                    # quiet RF environment rather than a fault. Warn without
-                    # mandating a reboot so we do not false-alarm.
-                    self._log(
-                        f"⚠️ Adapter has never seen any device in {self.consecutive_empty_scans} "
-                        f"consecutive scans. This may be a quiet RF environment rather than a "
-                        f"fault; not escalating to a reboot-required critical.",
-                        "WARNING"
-                    )
+                if self.consecutive_empty_scans >= 3:
+                    powered = await self._adapter_is_powered()
+                    if powered is False:
+                        # The adapter is present on the bus but not powered
+                        # while we need it to scan. That is genuine fault
+                        # evidence (not a quiet room - a working adapter in a
+                        # quiet room is powered). This covers both an adapter
+                        # that was never healthy and one that went down.
+                        self._log("⚠️ CRITICAL: adapter is not powered but discovery is running (adapter wedged/powered-off)", "ERROR")
+                        self._log("⚠️ Bluetooth/BlueZ state is inconsistent", "ERROR")
+                        self._log("⚠️ Reboot (or 'bluetoothctl power on') required to restore BLE scanning", "ERROR")
+                        if self.on_error:
+                            self.on_error("critical",
+                                f"Adapter is not powered after {self.consecutive_empty_scans} "
+                                f"consecutive blind scans (0 devices, adapter Powered=False). "
+                                f"Bluetooth stack requires reboot or manual power-on.",
+                                Exception("Adapter not powered during discovery"))
+                    else:
+                        # powered is True (working adapter in a quiet room) or
+                        # None (could not determine state). No positive fault
+                        # evidence - warn without mandating a reboot so a
+                        # healthy, self-recovering adapter is never torn down
+                        # over a quiet environment.
+                        state = "powered" if powered is True else "state unknown"
+                        self._log(
+                            f"⚠️ No BLE devices in {self.consecutive_empty_scans} consecutive scans "
+                            f"but adapter is {state}. Likely a quiet RF environment or a "
+                            f"transient wedge that will recover on its own; not escalating to a "
+                            f"reboot-required critical.",
+                            "WARNING"
+                        )
         else:
             # Reset counter on successful callback
-            self.healthy_ever = True
             if self.consecutive_empty_scans > 0:
                 self._log(f"✓ Scanner callbacks resumed after {self.consecutive_empty_scans} empty scans", "INFO")
             self.consecutive_empty_scans = 0
@@ -847,6 +852,51 @@ class LinuxBluetoothDriver(BLEDriverInterface):
         except Exception as e:
             self._log(f"⚠️ Adapter health scan failed: {e}", "WARNING")
             return -1
+
+    async def _adapter_is_powered(self) -> Optional[bool]:
+        """Query the adapter's OWN BlueZ "Powered" state via D-Bus.
+
+        Why this is needed: an empty unfiltered scan cannot distinguish a
+        genuinely quiet RF environment (adapter healthy, simply no BLE devices
+        in range) from a dead/wedged adapter (no devices BECAUSE the adapter is
+        down). Both look identical by device count. The adapter's own Powered
+        property is an independent signal that does not depend on what the
+        adapter can see:
+          * a working adapter in a quiet room reads Powered=True;
+          * a dead/powered-off adapter reads Powered=False (or its D-Bus object
+            is absent).
+        This is what lets us issue a "reboot required" critical only on genuine
+        fault evidence instead of on an empty scan.
+
+        Returns True (adapter powered), False (adapter present but not
+        powered), or None if the state could not be determined (D-Bus
+        unavailable, no bluez, or a query error). A None means "no positive
+        fault evidence" - the caller must not escalate to critical on it.
+        """
+        if not HAS_DBUS:
+            return None
+        bus = None
+        try:
+            bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+            introspection = await bus.introspect('org.bluez', self.adapter_path)
+            adapter_obj = bus.get_proxy_object('org.bluez', self.adapter_path, introspection)
+            adapter_iface = adapter_obj.get_interface('org.bluez.Adapter1')
+            powered = await adapter_iface.get_powered()
+            self._log(f"🩺 Adapter powered state: {powered}", "DEBUG")
+            return bool(powered)
+        except Exception as e:
+            # Could not determine adapter state. This alone is NOT proof the
+            # adapter is broken (D-Bus may be busy, adapter object not yet
+            # registered at boot, etc.) - report unknown and let the caller
+            # treat it as "no positive fault evidence."
+            self._log(f"⚠️ Could not determine adapter powered state: {e}", "DEBUG")
+            return None
+        finally:
+            if bus:
+                try:
+                    bus.disconnect()
+                except Exception:
+                    pass
 
     # ========================================================================
     # Advertising (Peripheral Mode)
