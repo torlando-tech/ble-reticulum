@@ -288,6 +288,13 @@ class PeerConnection:
     peer_identity: Optional[bytes] = None  # 16-byte identity hash
 
 
+# Wall-clock bound for the _adapter_is_powered() D-Bus query. BlueZ property
+# reads are normally well under a second; 5s is generous but keeps a
+# hung/absent BlueZ from stalling the discovery loop indefinitely. Exposed as a
+# module constant so tests can shorten it without waiting the full 5s.
+POWERED_QUERY_TIMEOUT_S = 5.0
+
+
 class LinuxBluetoothDriver(BLEDriverInterface):
     """
     Linux implementation of BLE driver using bleak and bluezero.
@@ -870,20 +877,46 @@ class LinuxBluetoothDriver(BLEDriverInterface):
 
         Returns True (adapter powered), False (adapter present but not
         powered), or None if the state could not be determined (D-Bus
-        unavailable, no bluez, or a query error). A None means "no positive
-        fault evidence" - the caller must not escalate to critical on it.
+        unavailable, no bluez, a query error, or the query timed out). A None
+        means "no positive fault evidence" - the caller must not escalate to
+        critical on it.
+
+        The whole query is bounded by a wall-clock timeout: this is called
+        from inside _perform_scan, so if BlueZ stops replying to D-Bus (e.g.
+        the adapter is wedged at the D-Bus level), the query must not hang
+        discovery. A timeout is treated as an unknown state, not a fault.
         """
         if not HAS_DBUS:
             return None
-        bus = None
         try:
-            bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
-            introspection = await bus.introspect('org.bluez', self.adapter_path)
-            adapter_obj = bus.get_proxy_object('org.bluez', self.adapter_path, introspection)
-            adapter_iface = adapter_obj.get_interface('org.bluez.Adapter1')
-            powered = await adapter_iface.get_powered()
+            # Bound the whole D-Bus round-trip so a hung/absent BlueZ cannot
+            # wedge the discovery loop. BlueZ property reads are normally well
+            # under a second; 5s is generous but keeps this from stalling the
+            # scan cycle indefinitely. The bus is connected and disconnected
+            # inside _query (its own finally), so a wait_for timeout - which
+            # cancels _query - still releases the connection.
+            async def _query():
+                bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+                try:
+                    introspection = await bus.introspect('org.bluez', self.adapter_path)
+                    adapter_obj = bus.get_proxy_object('org.bluez', self.adapter_path, introspection)
+                    adapter_iface = adapter_obj.get_interface('org.bluez.Adapter1')
+                    return await adapter_iface.get_powered()
+                finally:
+                    try:
+                        bus.disconnect()
+                    except Exception:
+                        pass
+            powered = await asyncio.wait_for(_query(), timeout=POWERED_QUERY_TIMEOUT_S)
             self._log(f"🩺 Adapter powered state: {powered}", "DEBUG")
             return bool(powered)
+        except asyncio.TimeoutError:
+            # BlueZ did not reply in time. This is NOT proof the adapter is
+            # broken (the bus may just be busy) - report unknown and let the
+            # caller treat it as "no positive fault evidence." Crucially, this
+            # returns control to the scan loop instead of hanging it.
+            self._log("⚠️ Timed out querying adapter powered state (BlueZ not responding); treating as unknown", "DEBUG")
+            return None
         except Exception as e:
             # Could not determine adapter state. This alone is NOT proof the
             # adapter is broken (D-Bus may be busy, adapter object not yet
@@ -891,12 +924,6 @@ class LinuxBluetoothDriver(BLEDriverInterface):
             # treat it as "no positive fault evidence."
             self._log(f"⚠️ Could not determine adapter powered state: {e}", "DEBUG")
             return None
-        finally:
-            if bus:
-                try:
-                    bus.disconnect()
-                except Exception:
-                    pass
 
     # ========================================================================
     # Advertising (Peripheral Mode)

@@ -416,3 +416,45 @@ class TestAdapterIsPowered:
             result = await d._adapter_is_powered()
         # No D-Bus at all: unknown, and no bus connection is attempted.
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_hung_bluez_times_out_as_unknown(self):
+        """Greptile P1 (timeout): if BlueZ stops replying, the query must not
+        hang the discovery loop. The whole D-Bus round-trip is bounded by a
+        wall-clock timeout; a timeout is treated as an unknown state (no
+        positive fault evidence) and returns control to the scan loop.
+
+        connect() is made to sleep well past the (patched) timeout so the
+        query genuinely hangs; wait_for must cancel it and return None quickly.
+        """
+        from ble_reticulum import linux_bluetooth_driver as m
+        d = _make_driver_real_powered()
+
+        bus = Mock()
+
+        async def _hang_forever():
+            # Simulate BlueZ not replying: never completes.
+            await asyncio.sleep(60.0)
+
+        # connect() hangs; introspect/get_powered are irrelevant (never reached
+        # before the timeout fires).
+        bus.connect = _hang_forever
+        bus.disconnect = Mock()
+
+        import time
+        mb = patch.object(m, "MessageBus")
+        mock_bus_class = mb.start()  # start() returns the mock (not the _patch)
+        mock_bus_class.return_value = bus
+        # Patch the timeout down so the test is fast (no 5s wait).
+        timeout_patch = patch.object(m, "POWERED_QUERY_TIMEOUT_S", 0.05)
+        with patch.object(m, "HAS_DBUS", True), timeout_patch:
+            start = time.monotonic()
+            try:
+                result = await d._adapter_is_powered()
+            finally:
+                mb.stop()
+            elapsed = time.monotonic() - start
+        # Timed out -> unknown, and it did NOT hang (returned well before the
+        # 60s sleep would have, and around the 0.05s bound, not unbounded).
+        assert result is None
+        assert elapsed < 5.0  # sanity: returned promptly, not stuck
