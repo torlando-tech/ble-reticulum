@@ -387,6 +387,13 @@ class LinuxBluetoothDriver(BLEDriverInterface):
 
         # Scanner health tracking
         self.consecutive_empty_scans = 0
+        # Whether the adapter has ever demonstrated a working scan (seen any
+        # device, or received any Reticulum callback). Used to distinguish a
+        # genuinely wedged adapter (was healthy, now blind) from a quiet RF
+        # environment where no BLE devices are present at all (never seen
+        # anything, not necessarily broken). Only the former warrants a
+        # "system reboot required" critical.
+        self.healthy_ever = False
 
         # Apply BlueZ timing patch
         apply_bluez_services_resolved_patch()
@@ -694,8 +701,19 @@ class LinuxBluetoothDriver(BLEDriverInterface):
         # Reticulum peer to advertise. Only a fully blind adapter (unfiltered
         # scan also empty) counts as a genuine wedge.
         if callback_count[0] == 0:
+            # Re-check connection state before starting a SECOND scan. The
+            # pause check at the top of _perform_scan ran before the main scan;
+            # a connection could have started during the main scan window. If so,
+            # running the unfiltered health scan now would start another BlueZ
+            # scan mid-connection and trigger an "Operation already in progress"
+            # error. Skip the health scan this cycle (it will run next cycle);
+            # treat the filtered result as-is without changing the streak.
+            if self._should_pause_scanning():
+                self._log("Pausing health scan: connection(s) in progress", "DEBUG")
+                return
             health_devices = await self._adapter_health_check()
             if health_devices > 0:
+                self.healthy_ever = True
                 if self.consecutive_empty_scans > 0:
                     self._log(f"✓ Scanner callbacks resumed after {self.consecutive_empty_scans} empty scans", "INFO")
                 self.consecutive_empty_scans = 0
@@ -704,25 +722,65 @@ class LinuxBluetoothDriver(BLEDriverInterface):
                     f"(unfiltered health scan saw {health_devices} device(s)) - not a wedge",
                     "INFO"
                 )
+            elif health_devices < 0:
+                # The health scan itself FAILED (D-Bus/adapter error). A scan
+                # that cannot even run is direct evidence the adapter is in a
+                # bad state - unlike a clean zero, which in a quiet RF
+                # environment may be benign. Escalate regardless of whether we
+                # ever saw a healthy scan.
+                self.consecutive_empty_scans += 1
+                self._log(
+                    f"⚠️ Unfiltered health scan FAILED (adapter in fault state) "
+                    f"(streak: {self.consecutive_empty_scans})", "WARNING"
+                )
+                if self.consecutive_empty_scans >= 3:
+                    self._log("⚠️ CRITICAL: unfiltered health scan repeatedly failing (adapter wedged)", "ERROR")
+                    self._log("⚠️ Bluetooth/BlueZ/D-Bus state is corrupted", "ERROR")
+                    self._log("⚠️ System reboot required to restore BLE scanning", "ERROR")
+                    if self.on_error:
+                        self.on_error("critical",
+                            f"Adapter health scan has failed for {self.consecutive_empty_scans} "
+                            f"consecutive scans (adapter in fault state). Bluetooth stack requires reboot.",
+                            Exception("BleakScanner health scan failed"))
             else:
+                # Clean zero: unfiltered scan ran but saw no devices at all.
                 self.consecutive_empty_scans += 1
                 self._log(
                     f"⚠️ Scanner blind: 0 Reticulum callbacks AND 0 devices in unfiltered "
                     f"health scan (streak: {self.consecutive_empty_scans})", "WARNING"
                 )
 
-                if self.consecutive_empty_scans >= 3:
-                    self._log("⚠️ CRITICAL: Bleak scanner callbacks not firing (adapter blind to all devices)", "ERROR")
+                # Only escalate to a "reboot required" critical if the adapter
+                # was previously proven healthy and has now gone blind. An
+                # empty unfiltered scan in a genuinely quiet RF environment
+                # (no BLE devices in range at all) is NOT proof the adapter is
+                # broken - in that case both scans legitimately return nothing,
+                # and mandating a system reboot would be a false alarm. A truly
+                # wedged adapter is one that USED to see devices and no longer
+                # can, so gate the critical on healthy_ever.
+                if self.consecutive_empty_scans >= 3 and self.healthy_ever:
+                    self._log("⚠️ CRITICAL: adapter was healthy but is now blind to all devices (likely wedged)", "ERROR")
                     self._log("⚠️ Bluetooth/BlueZ/D-Bus state is corrupted", "ERROR")
                     self._log("⚠️ System reboot required to restore BLE scanning", "ERROR")
 
                     if self.on_error:
                         self.on_error("critical",
-                            f"Scanner callback failure detected (adapter blind to all devices for "
+                            f"Scanner callback failure detected (adapter was healthy but is blind to all devices for "
                             f"{self.consecutive_empty_scans} consecutive scans). Bluetooth stack requires reboot.",
                             Exception("BleakScanner callbacks not invoked"))
+                elif self.consecutive_empty_scans >= 3:
+                    # Never demonstrated a working scan: this may simply be a
+                    # quiet RF environment rather than a fault. Warn without
+                    # mandating a reboot so we do not false-alarm.
+                    self._log(
+                        f"⚠️ Adapter has never seen any device in {self.consecutive_empty_scans} "
+                        f"consecutive scans. This may be a quiet RF environment rather than a "
+                        f"fault; not escalating to a reboot-required critical.",
+                        "WARNING"
+                    )
         else:
             # Reset counter on successful callback
+            self.healthy_ever = True
             if self.consecutive_empty_scans > 0:
                 self._log(f"✓ Scanner callbacks resumed after {self.consecutive_empty_scans} empty scans", "INFO")
             self.consecutive_empty_scans = 0
@@ -775,9 +833,11 @@ class LinuxBluetoothDriver(BLEDriverInterface):
         see any BLE device at all (including weak ones we would filter out by
         RSSI), it is alive and we are simply waiting for a peer.
 
-        Returns the number of distinct devices seen (0 = adapter appears blind).
-        If the health scan itself raises, the adapter is in a bad state and we
-        return 0 so it counts toward the genuine-wedge streak.
+        Returns the number of distinct devices seen. A negative value (-1)
+        indicates the health scan itself failed (D-Bus/adapter error) rather
+        than returning zero devices - the caller treats a failed scan as direct
+        evidence of an adapter fault (unlike a clean zero, which in a quiet RF
+        environment may be benign).
         """
         try:
             devices = await BleakScanner.discover(timeout=1.0)
@@ -786,7 +846,7 @@ class LinuxBluetoothDriver(BLEDriverInterface):
             return count
         except Exception as e:
             self._log(f"⚠️ Adapter health scan failed: {e}", "WARNING")
-            return 0
+            return -1
 
     # ========================================================================
     # Advertising (Peripheral Mode)

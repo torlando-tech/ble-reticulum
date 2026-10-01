@@ -11,11 +11,22 @@ the window the peer was about to come online. (Observed on two Pi Zero 2 W: both
 wedge at boot, ~3-5 empty filtered scans, then recover on their own - which a
 genuinely wedged adapter can never do without a reboot.)
 
-**Fix**: When a service-filtered scan returns zero callbacks, run a short
-UNFILTERED health scan (BleakScanner.discover with no service filter). If it sees
-ANY device, the adapter is alive and we are simply waiting for a Reticulum peer -
-reset the streak, do NOT fire critical. Only a fully blind adapter (unfiltered
-scan also empty) counts toward the genuine-wedge streak.
+**Fix**: When a service-filtered scan returns zero callbacks, re-check that no
+connection is in progress (the pause check at the top of _perform_scan ran
+before the main scan; a connection could have started during that window, and
+a second scan mid-connection would collide with it). Then run a short UNFILTERED
+health scan (BleakScanner.discover with no service filter). Three outcomes:
+  * health scan sees >= 1 device -> adapter is ALIVE, just waiting for a
+    Reticulum peer; reset the streak, do NOT fire critical (the false-positive
+    case at boot);
+  * health scan runs but sees 0 devices (clean zero) -> only escalate to the
+    "reboot required" critical if the adapter was PREVIOUSLY proven healthy
+    (healthy_ever) and has now gone blind. A clean zero in a genuinely quiet
+    RF environment (no BLE devices in range at all) is NOT proof the adapter is
+    broken - both scans legitimately return nothing, so warn without mandating
+    a reboot (this is the Greptile 3/5 P1 overclaim fix);
+  * health scan itself raises (D-Bus/adapter error) -> that is direct evidence
+    the adapter is in a fault state; escalate regardless of healthy_ever.
 
 **Test strategy**: Drive the REAL LinuxBluetoothDriver._perform_scan() with a
 mocked BleakScanner class. The main scan's detection callback never fires
@@ -70,6 +81,7 @@ def _make_driver():
     d = m.LinuxBluetoothDriver.__new__(m.LinuxBluetoothDriver)
     d._running = True
     d.consecutive_empty_scans = 0
+    d.healthy_ever = False
     d._log = Mock()
     d.on_error = Mock()
     d.service_uuid = SERVICE_UUID
@@ -81,19 +93,40 @@ def _make_driver():
     return d
 
 
-def _mock_scanner_class(discover_return):
+def _mock_scanner_class(discover_return, fire_callback=False):
     """Return a replacement for linux_bluetooth_driver.BleakScanner.
 
     The main discovery scan does `BleakScanner(detection_callback=...,
-    service_uuids=...)` then `await scanner.start()/stop()`. The detection
-    callback is never invoked (empty filtered scan). The health check does
+    service_uuids=...)` then `await scanner.start()/stop()`. By default the
+    detection callback is never invoked (empty filtered scan). With
+    fire_callback=True, start() invokes the captured detection_callback once
+    with a device advertising the Reticulum service UUID, so the scan reports a
+    real discovery (callback_count > 0). The health check does
     `await BleakScanner.discover(timeout=...)` which returns discover_return.
     """
     BS = Mock()
-    inst = BS.return_value
-    inst.start = AsyncMock()
-    inst.stop = AsyncMock()
     BS.discover = AsyncMock(return_value=discover_return)
+
+    def _factory(*args, **kwargs):
+        cb = kwargs.get("detection_callback")
+        inst = Mock()
+
+        async def _start(*a, **k):
+            if fire_callback and cb is not None:
+                device = Mock()
+                device.address = "AA:BB:CC:DD:EE:FF"
+                device.name = "PeerPi"
+                adv = Mock()
+                adv.rssi = -50
+                adv.service_uuids = [SERVICE_UUID]
+                adv.manufacturer_data = {}
+                cb(device, adv)
+
+        inst.start = _start
+        inst.stop = AsyncMock()
+        return inst
+
+    BS.side_effect = _factory
     return BS
 
 
@@ -126,18 +159,65 @@ class TestAdapterHealthCheckWedgeDetection:
         assert BS.discover.await_count >= 1
 
     @pytest.mark.asyncio
-    async def test_fully_blind_adapter_still_declares_wedge_after_3(self):
-        """Genuine wedge: unfiltered scan ALSO empty -> critical after 3 scans."""
+    async def test_was_healthy_then_blind_declares_wedge_after_3(self):
+        """
+        Genuine wedge: adapter was proven healthy, then goes fully blind.
+
+        This is the real corruption case - the adapter USED to see devices
+        (healthy_ever=True) and now its unfiltered scan is clean-zero for 3
+        scans. Must fire on_error("critical").
+        """
         from ble_reticulum import linux_bluetooth_driver as m
         d = _make_driver()
+        d.healthy_ever = True  # adapter previously saw devices
         with patch.object(m, "BleakScanner", _mock_scanner_class([])):
-            for i in range(3):
+            for _ in range(3):
                 await d._perform_scan()
         # After the 3rd fully-blind scan the critical error must fire.
         d.on_error.assert_called()
         args = d.on_error.call_args[0]
         assert args[0] == "critical"
         assert d.consecutive_empty_scans >= 3
+
+    @pytest.mark.asyncio
+    async def test_quiet_rf_never_healthy_does_not_reboot(self):
+        """
+        Greptile P1 overclaim fix: a clean zero (unfiltered scan ran but saw
+        0 devices) on an adapter that has NEVER demonstrated a working scan is
+        NOT proof the adapter is broken - in a genuinely quiet RF environment
+        both scans legitimately return nothing. Must NOT fire the reboot-
+        required critical; it only warns.
+        """
+        from ble_reticulum import linux_bluetooth_driver as m
+        d = _make_driver()
+        # healthy_ever stays False: adapter has never seen a device.
+        with patch.object(m, "BleakScanner", _mock_scanner_class([])):
+            for _ in range(5):  # well past the 3-scan threshold
+                await d._perform_scan()
+        # Streak incremented, but no critical fired (quiet-room, not a fault).
+        assert d.consecutive_empty_scans >= 3
+        d.on_error.assert_not_called()
+        assert d.healthy_ever is False
+
+    @pytest.mark.asyncio
+    async def test_successful_scan_marks_healthy(self):
+        """
+        A filtered scan that DOES discover a Reticulum device (detection
+        callback fires) proves the adapter is healthy: it must set
+        healthy_ever=True, reset the empty-streak, and NOT fire any error.
+        This covers the callback-fired path in _perform_scan.
+        """
+        from ble_reticulum import linux_bluetooth_driver as m
+        d = _make_driver()
+        d.consecutive_empty_scans = 2  # start from a non-zero streak
+        BS = _mock_scanner_class([], fire_callback=True)
+        with patch.object(m, "BleakScanner", BS):
+            await d._perform_scan()
+        assert d.healthy_ever is True
+        assert d.consecutive_empty_scans == 0
+        d.on_error.assert_not_called()
+        # The device was forwarded to the discovered-device callback.
+        d.on_device_discovered.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_blind_then_healthy_resets_streak(self):
@@ -157,9 +237,10 @@ class TestAdapterHealthCheckWedgeDetection:
         d.on_error.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_health_scan_exception_counts_as_blind(self):
-        """If the health scan itself raises, the adapter is in a bad state and
-        it counts toward the wedge streak (fail closed, not fail open)."""
+    async def test_health_scan_failure_is_fault_evidence(self):
+        """If the health scan itself raises, that is direct evidence the adapter
+        is in a fault state (a scan that cannot run is not a quiet room). It
+        escalates to critical regardless of healthy_ever - fail closed."""
         from ble_reticulum import linux_bluetooth_driver as m
         d = _make_driver()
         BS = _mock_scanner_class([])
@@ -169,6 +250,32 @@ class TestAdapterHealthCheckWedgeDetection:
                 await d._perform_scan()
         d.on_error.assert_called()
         assert d.on_error.call_args[0][0] == "critical"
+
+    @pytest.mark.asyncio
+    async def test_connection_started_during_scan_skips_health_scan(self):
+        """
+        Greptile P1 race fix: a connection that starts during the main-scan
+        window must suppress the follow-up health scan. Re-checking
+        _should_pause_scanning() before the unfiltered scan prevents a second
+        BlueZ scan from colliding with an active connection ("Operation already
+        in progress"). Must NOT call the health scan and must NOT fire critical.
+        """
+        from ble_reticulum import linux_bluetooth_driver as m
+        d = _make_driver()
+        # Model the real race: the pause check at the TOP of _perform_scan sees
+        # "not paused" (False) so the main scan proceeds, but a connection starts
+        # DURING the scan window, so the re-check at the health-scan guard (after
+        # the main scan) sees "paused" (True). Each scan calls the check twice:
+        # top, then health-guard. So the sequence is F,T,F,T,...
+        d._should_pause_scanning = Mock(side_effect=[False, True] * 5)
+        BS = _mock_scanner_class([])
+        with patch.object(m, "BleakScanner", BS):
+            for _ in range(5):
+                await d._perform_scan()
+        # The unfiltered health scan must never have run (guard caught the
+        # in-progress connection each cycle).
+        assert BS.discover.await_count == 0
+        d.on_error.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_adapter_health_check_returns_count(self):
