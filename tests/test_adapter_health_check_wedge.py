@@ -113,13 +113,17 @@ class TestAdapterHealthCheckWedgeDetection:
         from ble_reticulum import linux_bluetooth_driver as m
         d = _make_driver()
         two_devices = [Mock(), Mock()]
-        with patch.object(m, "BleakScanner", _mock_scanner_class(two_devices)):
+        # Bind the mock to a local so we can assert on its call count after the
+        # patch context has exited (m.BleakScanner reverts to the real class
+        # once the with-block ends, where .discover is a plain function).
+        BS = _mock_scanner_class(two_devices)
+        with patch.object(m, "BleakScanner", BS):
             for _ in range(5):
                 await d._perform_scan()
         d.on_error.assert_not_called()
         assert d.consecutive_empty_scans == 0
         # Health check actually ran on every empty filtered scan.
-        assert m.BleakScanner.discover.await_count >= 1
+        assert BS.discover.await_count >= 1
 
     @pytest.mark.asyncio
     async def test_fully_blind_adapter_still_declares_wedge_after_3(self):
