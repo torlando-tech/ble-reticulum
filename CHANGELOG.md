@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-10-03
+
+### Added
+- **Scanner wedge health-check**: distinguishes a quiet radio room from a genuinely dead/wedged Bluetooth adapter using BlueZ's own `Powered` state, with a bounded (5s) D-Bus query so a hung adapter can't wedge the discovery loop (#49)
+- **Zombie-connection detection** to break symmetric dual-connection deadlocks between two peers
+- **Identity cache on disconnect** to prevent data loss on reconnection
+- **Event-driven D-Bus disconnect monitoring** (replaces polling; eliminates HCI errors on BCM43xx chips)
+
+### Changed
+- **Package renamed** from `RNS.Interfaces` to `ble_reticulum` (namespace refactor)
+
+### Fixed
+- **Inbound BLE packets crash on `AttributeError: 'BLEPeerInterface' object has no attribute 'ifac_size'`** - `BLEPeerInterface` now inherits `ifac_size` from the parent `Interface`. Without this, RNS 1.5.x dropped every inbound packet on spawned peer interfaces, breaking announce ingestion and message delivery on devices using the new wheel (#45)
+- **Announce-rate stats**: `BLEPeerInterface` now exposes `announce_rate_grace` / `announce_rate_penalty` that the RNS stats RPC reads (#47)
+- **Duplicate-identity false positives**: peer address is normalized (strips `dev:` prefix) before the duplicate-identity comparison, fixing spurious rejections (#48)
+- **MAC rotation**: update `BLEPeerInterface.peer_address` on rotation and prevent interface/fragmenter loss during the change
+- **Duplicate-identity handshake**: verify the connection is still alive before rejecting, consume the handshake when the identity is already known via the driver callback, and don't trigger the blacklist on a benign duplicate
+- Identity handshake timeout for non-Reticulum connections, plus address-based fallback for peer interface cleanup
+- `_compute_identity_hash()` no longer double-hashes the identity
+- Clean up `address_to_identity` in `_cleanup_stale_interface()`
+
+### CI
+- Reticulum init singleton in `conftest` so real `Interface` tests run under CI
+- Broadened CI path filter to `tests/*.py` so conftest changes trigger the suite
+
 ## [0.2.2] - 2025-11-15
 
 ### Added
